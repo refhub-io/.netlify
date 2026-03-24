@@ -1,5 +1,8 @@
 import crypto from "node:crypto";
 
+const CORS_ALLOWED_METHODS = "GET,POST,PATCH,DELETE,OPTIONS";
+const CORS_ALLOWED_HEADERS = "Authorization, Content-Type, X-Api-Key";
+
 function normalizeHeaders(headers = {}) {
   const normalized = {};
 
@@ -8,6 +11,17 @@ function normalizeHeaders(headers = {}) {
   }
 
   return normalized;
+}
+
+function appendVary(currentValue, nextValue) {
+  const values = new Set(
+    `${currentValue || ""},${nextValue || ""}`
+      .split(",")
+      .map((value) => value.trim())
+      .filter(Boolean),
+  );
+
+  return [...values].join(", ");
 }
 
 export function createRequestContext(event) {
@@ -92,4 +106,40 @@ export function getRouteSegments(path) {
       : normalized;
 
   return withoutPrefix.split("/").filter(Boolean);
+}
+
+export function createCorsHeaders(event, allowedOrigins = []) {
+  const headers = normalizeHeaders(event.headers);
+  const origin = headers.origin;
+
+  if (!origin || !allowedOrigins.includes(origin)) {
+    return {};
+  }
+
+  return {
+    "access-control-allow-origin": origin,
+    "access-control-allow-methods": CORS_ALLOWED_METHODS,
+    "access-control-allow-headers": headers["access-control-request-headers"] || CORS_ALLOWED_HEADERS,
+    "access-control-max-age": "86400",
+    vary: "Origin",
+  };
+}
+
+export function withCors(response, corsHeaders) {
+  if (!corsHeaders || Object.keys(corsHeaders).length === 0) {
+    return response;
+  }
+
+  const responseHeaders = response.headers || {};
+  const mergedHeaders = {
+    ...responseHeaders,
+    ...corsHeaders,
+  };
+
+  mergedHeaders.vary = appendVary(responseHeaders.vary, corsHeaders.vary);
+
+  return {
+    ...response,
+    headers: mergedHeaders,
+  };
 }

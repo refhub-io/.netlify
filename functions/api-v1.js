@@ -11,6 +11,7 @@ import {
 import { getConfig } from "../src/config.js";
 import { serializeVaultExport } from "../src/export.js";
 import {
+  createCorsHeaders,
   createRequestContext,
   errorResponse,
   getRequestBodySize,
@@ -18,6 +19,7 @@ import {
   json,
   parseJsonBody,
   text,
+  withCors,
 } from "../src/http.js";
 
 const PUBLICATION_FIELDS = [
@@ -921,23 +923,27 @@ async function handleExportVault(supabase, principal, context, vaultId, event) {
 
 export async function handler(event) {
   const context = createRequestContext(event);
+  const corsHeaders = createCorsHeaders(event, getConfig().allowedOrigins);
   let supabase = null;
   let principal = null;
   let response;
 
   try {
     if (event.httpMethod === "OPTIONS") {
-      return {
+      return withCors({
         statusCode: 204,
         headers: {
           allow: "GET,POST,PATCH,DELETE,OPTIONS",
         },
-      };
+      }, corsHeaders);
     }
 
     const { maxBodyBytes } = getConfig();
     if (getRequestBodySize(event) > maxBodyBytes) {
-      return errorResponse(413, "request_too_large", `Request body exceeds ${maxBodyBytes} bytes`, context.requestId);
+      return withCors(
+        errorResponse(413, "request_too_large", `Request body exceeds ${maxBodyBytes} bytes`, context.requestId),
+        corsHeaders,
+      );
     }
 
     const route = getRouteSegments(event.path || "/");
@@ -946,9 +952,12 @@ export async function handler(event) {
     if (isManagementRoute) {
       const authResult = await authenticateManagementUser(event);
       if (authResult.error) {
-        return errorResponse(401, authResult.error, getManagementAuthFailureMessage(authResult.error), context.requestId, {
-          auth_scheme: "Bearer",
-        });
+        return withCors(
+          errorResponse(401, authResult.error, getManagementAuthFailureMessage(authResult.error), context.requestId, {
+            auth_scheme: "Bearer",
+          }),
+          corsHeaders,
+        );
       }
 
       supabase = authResult.supabase;
@@ -968,9 +977,12 @@ export async function handler(event) {
     } else {
       const authResult = await authenticateApiKey(event);
       if (authResult.error) {
-        return errorResponse(401, authResult.error, getAuthFailureMessage(authResult.error), context.requestId, {
-          auth_scheme: "Bearer",
-        });
+        return withCors(
+          errorResponse(401, authResult.error, getAuthFailureMessage(authResult.error), context.requestId, {
+            auth_scheme: "Bearer",
+          }),
+          corsHeaders,
+        );
       }
 
       supabase = authResult.supabase;
@@ -1015,5 +1027,5 @@ export async function handler(event) {
     });
   }
 
-  return response;
+  return withCors(response, corsHeaders);
 }

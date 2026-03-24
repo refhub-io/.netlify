@@ -1,5 +1,6 @@
 const DEFAULT_MAX_BULK_ITEMS = 50;
 const DEFAULT_MAX_BODY_BYTES = 262144;
+const DEFAULT_ALLOWED_ORIGINS = ["https://refhub.io", "http://localhost:3000"];
 
 function readRequired(name) {
   const value = process.env[name];
@@ -28,6 +29,14 @@ export function getConfig() {
         throw new Error("REFHUB_API_MAX_BODY_BYTES must be a positive integer");
       }
       return n;
+    })(),
+    allowedOrigins: (() => {
+      const raw = process.env.REFHUB_API_ALLOWED_ORIGINS;
+      const values = raw
+        ? raw.split(",").map((value) => value.trim()).filter(Boolean)
+        : DEFAULT_ALLOWED_ORIGINS;
+
+      return [...new Set(values)];
     })(),
     auditDisabled: process.env.REFHUB_API_AUDIT_DISABLED === "true",
   };

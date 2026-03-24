@@ -11,14 +11,25 @@ export const API_SCOPES = {
   EXPORT: "vaults:export",
 };
 
+const MANAGEMENT_SCOPES = new Set(Object.values(API_SCOPES));
+
 function hashApiKey(rawKey, pepper) {
   return crypto.createHash("sha256").update(`${pepper}:${rawKey}`).digest("hex");
 }
 
-function getPresentedApiKey(headers) {
+function getBearerToken(headers) {
   const authorization = headers.authorization;
   if (authorization?.startsWith("Bearer ")) {
     return authorization.slice("Bearer ".length).trim();
+  }
+
+  return null;
+}
+
+function getPresentedApiKey(headers) {
+  const bearerToken = getBearerToken(headers);
+  if (bearerToken) {
+    return bearerToken;
   }
 
   return headers["x-api-key"] || null;
@@ -107,6 +118,7 @@ export async function authenticateApiKey(event) {
   return {
     supabase,
     principal: {
+      authType: "api_key",
       keyId: data.id,
       userId: data.owner_user_id,
       label: data.label,
@@ -114,6 +126,50 @@ export async function authenticateApiKey(event) {
       restrictedVaultIds: vaultIds.length > 0 ? new Set(vaultIds) : null,
     },
   };
+}
+
+export async function authenticateManagementUser(event) {
+  const headers = Object.fromEntries(
+    Object.entries(event.headers || {}).map(([key, value]) => [key.toLowerCase(), value]),
+  );
+  const accessToken = getBearerToken(headers);
+  if (!accessToken) {
+    return { error: "missing_bearer_token" };
+  }
+
+  const supabase = getSupabaseAdmin();
+  const { data, error } = await supabase.auth.getUser(accessToken);
+  if (error || !data?.user) {
+    return { error: "invalid_bearer_token" };
+  }
+
+  return {
+    supabase,
+    principal: {
+      authType: "management_user",
+      userId: data.user.id,
+      email: data.user.email || null,
+    },
+  };
+}
+
+export function createApiKeySecret() {
+  const publicId = crypto.randomBytes(6).toString("hex");
+  const secret = crypto.randomBytes(24).toString("hex");
+  const rawKey = `rhk_${publicId}_${secret}`;
+
+  return {
+    rawKey,
+    keyPrefix: `rhk_${publicId}`,
+  };
+}
+
+export function hashManagedApiKey(rawKey) {
+  return hashApiKey(rawKey, getConfig().apiKeyPepper);
+}
+
+export function isValidApiKeyScope(scope) {
+  return MANAGEMENT_SCOPES.has(scope);
 }
 
 export function requireScope(principal, scope) {

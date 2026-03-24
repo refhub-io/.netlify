@@ -1,4 +1,13 @@
-import { API_SCOPES, authenticateApiKey, requireScope, resolveVaultAccess } from "../src/auth.js";
+import {
+  API_SCOPES,
+  authenticateApiKey,
+  authenticateManagementUser,
+  createApiKeySecret,
+  hashManagedApiKey,
+  isValidApiKeyScope,
+  requireScope,
+  resolveVaultAccess,
+} from "../src/auth.js";
 import { getConfig } from "../src/config.js";
 import { serializeVaultExport } from "../src/export.js";
 import {
@@ -46,6 +55,8 @@ const PUBLICATION_FIELDS = [
 
 const VAULT_SELECT =
   "id, user_id, name, description, color, public_slug, category, abstract, created_at, updated_at, visibility";
+const API_KEY_SELECT =
+  "id, owner_user_id, label, description, key_prefix, scopes, expires_at, revoked_at, last_used_at, created_at, api_key_vaults(vault_id)";
 const VAULT_PUBLICATION_SELECT = [
   "id",
   "vault_id",
@@ -82,6 +93,296 @@ function getAuthFailureMessage(code) {
   return "API key authentication failed";
 }
 
+function getManagementAuthFailureMessage(code) {
+  if (code === "missing_bearer_token") {
+    return "Bearer token is required";
+  }
+
+  if (code === "invalid_bearer_token") {
+    return "Bearer token is invalid";
+  }
+
+  return "Bearer token authentication failed";
+}
+
+function serializeApiKeyRecord(record) {
+  return {
+    id: record.id,
+    label: record.label,
+    description: record.description,
+    key_prefix: record.key_prefix,
+    scopes: record.scopes || [],
+    expires_at: record.expires_at,
+    revoked_at: record.revoked_at,
+    last_used_at: record.last_used_at,
+    created_at: record.created_at,
+    vault_ids: (record.api_key_vaults || []).map((entry) => entry.vault_id),
+  };
+}
+
+function normalizeRequestedScopes(scopes) {
+  if (!Array.isArray(scopes) || scopes.length === 0) {
+    return { error: "invalid_scopes", message: "Body must include a non-empty scopes array" };
+  }
+
+  const normalized = [...new Set(scopes)];
+  if (normalized.some((scope) => typeof scope !== "string" || !isValidApiKeyScope(scope))) {
+    return { error: "invalid_scopes", message: "Scopes must be one of vaults:read, vaults:write, vaults:export" };
+  }
+
+  return { value: normalized };
+}
+
+function normalizeExpiresAt(expiresAt) {
+  if (expiresAt === undefined || expiresAt === null || expiresAt === "") {
+    return { value: null };
+  }
+
+  if (typeof expiresAt !== "string") {
+    return { error: "invalid_expires_at", message: "expires_at must be an ISO-8601 timestamp or null" };
+  }
+
+  const parsed = new Date(expiresAt);
+  if (Number.isNaN(parsed.getTime())) {
+    return { error: "invalid_expires_at", message: "expires_at must be an ISO-8601 timestamp or null" };
+  }
+
+  if (parsed.getTime() <= Date.now()) {
+    return { error: "invalid_expires_at", message: "expires_at must be in the future" };
+  }
+
+  return { value: parsed.toISOString() };
+}
+
+async function resolveManagedVaultIds(supabase, userId, requestedVaultIds) {
+  const uniqueVaultIds = [...new Set(requestedVaultIds)];
+  if (uniqueVaultIds.length === 0) {
+    return { value: [] };
+  }
+
+  const ownedResult = await supabase
+    .from("vaults")
+    .select("id")
+    .eq("user_id", userId)
+    .in("id", uniqueVaultIds);
+
+  if (ownedResult.error) {
+    throw ownedResult.error;
+  }
+
+  const sharedResult = await supabase
+    .from("vault_shares")
+    .select("vault_id")
+    .eq("shared_with_user_id", userId)
+    .in("vault_id", uniqueVaultIds);
+
+  if (sharedResult.error) {
+    throw sharedResult.error;
+  }
+
+  const allowedVaultIds = new Set([
+    ...(ownedResult.data || []).map((vault) => vault.id),
+    ...(sharedResult.data || []).map((share) => share.vault_id),
+  ]);
+
+  const inaccessibleVaultIds = uniqueVaultIds.filter((vaultId) => !allowedVaultIds.has(vaultId));
+  if (inaccessibleVaultIds.length > 0) {
+    return {
+      error: "invalid_vault_ids",
+      message: "One or more vault_ids are not accessible to this user",
+      details: inaccessibleVaultIds,
+    };
+  }
+
+  return { value: uniqueVaultIds };
+}
+
+async function fetchManagedApiKey(supabase, keyId, ownerUserId) {
+  const result = await supabase
+    .from("api_keys")
+    .select(API_KEY_SELECT)
+    .eq("id", keyId)
+    .eq("owner_user_id", ownerUserId)
+    .maybeSingle();
+
+  if (result.error) {
+    throw result.error;
+  }
+
+  return result.data;
+}
+
+async function handleListApiKeys(supabase, principal, context) {
+  const result = await supabase
+    .from("api_keys")
+    .select(API_KEY_SELECT)
+    .eq("owner_user_id", principal.userId)
+    .order("created_at", { ascending: false });
+
+  if (result.error) {
+    throw result.error;
+  }
+
+  return json(200, {
+    data: (result.data || []).map(serializeApiKeyRecord),
+    meta: {
+      request_id: context.requestId,
+    },
+  });
+}
+
+async function handleCreateApiKey(supabase, principal, context, event) {
+  const parsedBody = parseJsonBody(event);
+  if (!parsedBody.ok) {
+    return errorResponse(400, "invalid_json", "Request body must be valid JSON", context.requestId);
+  }
+
+  const body = parsedBody.value || {};
+  const label = typeof body.label === "string" ? body.label.trim() : "";
+  if (!label) {
+    return errorResponse(400, "invalid_label", "Body must include a non-empty label", context.requestId);
+  }
+
+  if (body.description !== undefined && body.description !== null && typeof body.description !== "string") {
+    return errorResponse(400, "invalid_description", "description must be a string or null", context.requestId);
+  }
+
+  const scopesResult = normalizeRequestedScopes(body.scopes);
+  if (scopesResult.error) {
+    return errorResponse(400, scopesResult.error, scopesResult.message, context.requestId);
+  }
+
+  const expiresAtResult = normalizeExpiresAt(body.expires_at);
+  if (expiresAtResult.error) {
+    return errorResponse(400, expiresAtResult.error, expiresAtResult.message, context.requestId);
+  }
+
+  if (body.vault_ids !== undefined && !Array.isArray(body.vault_ids)) {
+    return errorResponse(400, "invalid_vault_ids", "vault_ids must be an array of vault ids", context.requestId);
+  }
+
+  const requestedVaultIds = body.vault_ids || [];
+  if (requestedVaultIds.some((vaultId) => typeof vaultId !== "string" || !vaultId)) {
+    return errorResponse(400, "invalid_vault_ids", "vault_ids must contain non-empty strings", context.requestId);
+  }
+
+  const managedVaultIds = await resolveManagedVaultIds(supabase, principal.userId, requestedVaultIds);
+  if (managedVaultIds.error) {
+    return errorResponse(403, managedVaultIds.error, managedVaultIds.message, context.requestId, {
+      vault_ids: managedVaultIds.details,
+    });
+  }
+
+  let createdKey = null;
+  let rawKey = null;
+
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const generated = createApiKeySecret();
+    rawKey = generated.rawKey;
+
+    const insertResult = await supabase
+      .from("api_keys")
+      .insert({
+        owner_user_id: principal.userId,
+        created_by: principal.userId,
+        label,
+        description: body.description?.trim() || null,
+        key_prefix: generated.keyPrefix,
+        key_hash: hashManagedApiKey(generated.rawKey),
+        scopes: scopesResult.value,
+        expires_at: expiresAtResult.value,
+      })
+      .select("id")
+      .single();
+
+    if (!insertResult.error) {
+      createdKey = insertResult.data;
+      break;
+    }
+
+    if (insertResult.error.code !== "23505") {
+      throw insertResult.error;
+    }
+  }
+
+  if (!createdKey || !rawKey) {
+    return errorResponse(500, "api_key_generation_failed", "Failed to generate a unique API key", context.requestId);
+  }
+
+  if (managedVaultIds.value.length > 0) {
+    const vaultInsertResult = await supabase.from("api_key_vaults").insert(
+      managedVaultIds.value.map((vaultId) => ({
+        api_key_id: createdKey.id,
+        vault_id: vaultId,
+      })),
+    );
+
+    if (vaultInsertResult.error) {
+      const rollbackResult = await supabase.from("api_keys").delete().eq("id", createdKey.id);
+      if (rollbackResult.error) {
+        console.error("API key vault restriction rollback failed", {
+          requestId: context.requestId,
+          keyId: createdKey.id,
+          code: vaultInsertResult.error.code,
+        });
+        return errorResponse(
+          500,
+          "api_key_partial_failure",
+          "API key creation failed after partial writes; manual reconciliation may be required",
+          context.requestId,
+        );
+      }
+
+      throw vaultInsertResult.error;
+    }
+  }
+
+  const storedKey = await fetchManagedApiKey(supabase, createdKey.id, principal.userId);
+  if (!storedKey) {
+    return errorResponse(500, "api_key_not_found", "API key was created but could not be reloaded", context.requestId);
+  }
+
+  return json(201, {
+    data: serializeApiKeyRecord(storedKey),
+    secret: rawKey,
+    meta: {
+      request_id: context.requestId,
+    },
+  });
+}
+
+async function handleRevokeApiKey(supabase, principal, context, keyId) {
+  const existingKey = await fetchManagedApiKey(supabase, keyId, principal.userId);
+  if (!existingKey) {
+    return errorResponse(404, "api_key_not_found", "API key not found", context.requestId);
+  }
+
+  if (!existingKey.revoked_at) {
+    const revokeResult = await supabase
+      .from("api_keys")
+      .update({ revoked_at: new Date().toISOString() })
+      .eq("id", keyId)
+      .eq("owner_user_id", principal.userId);
+
+    if (revokeResult.error) {
+      throw revokeResult.error;
+    }
+  }
+
+  const revokedKey = await fetchManagedApiKey(supabase, keyId, principal.userId);
+  if (!revokedKey) {
+    return errorResponse(404, "api_key_not_found", "API key not found", context.requestId);
+  }
+
+  return json(200, {
+    data: serializeApiKeyRecord(revokedKey),
+    meta: {
+      request_id: context.requestId,
+    },
+  });
+}
+
+
 function pickPublicationFields(input) {
   const row = {};
 
@@ -112,7 +413,7 @@ function pickPublicationFields(input) {
 
 async function writeAuditLog(supabase, context, principal, response, metadata = {}) {
   const { auditDisabled } = getConfig();
-  if (auditDisabled || !supabase || !principal) {
+  if (auditDisabled || !supabase || !principal || principal.authType !== "api_key") {
     return;
   }
 
@@ -629,7 +930,7 @@ export async function handler(event) {
       return {
         statusCode: 204,
         headers: {
-          allow: "GET,POST,PATCH,OPTIONS",
+          allow: "GET,POST,PATCH,DELETE,OPTIONS",
         },
       };
     }
@@ -639,29 +940,55 @@ export async function handler(event) {
       return errorResponse(413, "request_too_large", `Request body exceeds ${maxBodyBytes} bytes`, context.requestId);
     }
 
-    const authResult = await authenticateApiKey(event);
-    if (authResult.error) {
-      return errorResponse(401, authResult.error, getAuthFailureMessage(authResult.error), context.requestId, {
-        auth_scheme: "Bearer",
-      });
-    }
-
-    supabase = authResult.supabase;
-    principal = authResult.principal;
-
     const route = getRouteSegments(event.path || "/");
-    if (route.length === 1 && route[0] === "vaults" && event.httpMethod === "GET") {
-      response = await handleListVaults(supabase, principal, context);
-    } else if (route.length === 2 && route[0] === "vaults" && event.httpMethod === "GET") {
-      response = await handleReadVault(supabase, principal, context, route[1]);
-    } else if (route.length === 3 && route[0] === "vaults" && route[2] === "items" && event.httpMethod === "POST") {
-      response = await handleAddItems(supabase, principal, context, route[1], event);
-    } else if (route.length === 4 && route[0] === "vaults" && route[2] === "items" && event.httpMethod === "PATCH") {
-      response = await handleUpdateItem(supabase, principal, context, route[1], route[3], event);
-    } else if (route.length === 3 && route[0] === "vaults" && route[2] === "export" && event.httpMethod === "GET") {
-      response = await handleExportVault(supabase, principal, context, route[1], event);
+    const isManagementRoute = route[0] === "keys";
+
+    if (isManagementRoute) {
+      const authResult = await authenticateManagementUser(event);
+      if (authResult.error) {
+        return errorResponse(401, authResult.error, getManagementAuthFailureMessage(authResult.error), context.requestId, {
+          auth_scheme: "Bearer",
+        });
+      }
+
+      supabase = authResult.supabase;
+      principal = authResult.principal;
+
+      if (route.length === 1 && event.httpMethod === "GET") {
+        response = await handleListApiKeys(supabase, principal, context);
+      } else if (route.length === 1 && event.httpMethod === "POST") {
+        response = await handleCreateApiKey(supabase, principal, context, event);
+      } else if (route.length === 2 && event.httpMethod === "DELETE") {
+        response = await handleRevokeApiKey(supabase, principal, context, route[1]);
+      } else if (route.length === 3 && route[2] === "revoke" && event.httpMethod === "POST") {
+        response = await handleRevokeApiKey(supabase, principal, context, route[1]);
+      } else {
+        response = errorResponse(404, "route_not_found", "Route not found", context.requestId);
+      }
     } else {
-      response = errorResponse(404, "route_not_found", "Route not found", context.requestId);
+      const authResult = await authenticateApiKey(event);
+      if (authResult.error) {
+        return errorResponse(401, authResult.error, getAuthFailureMessage(authResult.error), context.requestId, {
+          auth_scheme: "Bearer",
+        });
+      }
+
+      supabase = authResult.supabase;
+      principal = authResult.principal;
+
+      if (route.length === 1 && route[0] === "vaults" && event.httpMethod === "GET") {
+        response = await handleListVaults(supabase, principal, context);
+      } else if (route.length === 2 && route[0] === "vaults" && event.httpMethod === "GET") {
+        response = await handleReadVault(supabase, principal, context, route[1]);
+      } else if (route.length === 3 && route[0] === "vaults" && route[2] === "items" && event.httpMethod === "POST") {
+        response = await handleAddItems(supabase, principal, context, route[1], event);
+      } else if (route.length === 4 && route[0] === "vaults" && route[2] === "items" && event.httpMethod === "PATCH") {
+        response = await handleUpdateItem(supabase, principal, context, route[1], route[3], event);
+      } else if (route.length === 3 && route[0] === "vaults" && route[2] === "export" && event.httpMethod === "GET") {
+        response = await handleExportVault(supabase, principal, context, route[1], event);
+      } else {
+        response = errorResponse(404, "route_not_found", "Route not found", context.requestId);
+      }
     }
   } catch (error) {
     console.error("Unhandled RefHub API error", {

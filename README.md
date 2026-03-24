@@ -6,13 +6,22 @@ This `.netlify` package is the initial Netlify Functions backend scaffold for AP
 
 It is intentionally narrow for v1:
 
+Management routes authenticated with a Supabase session JWT:
+
+- `GET /api/v1/keys`
+- `POST /api/v1/keys`
+- `POST /api/v1/keys/:keyId/revoke`
+- `DELETE /api/v1/keys/:keyId`
+
+Data routes authenticated with `rhk_...` API keys:
+
 - `GET /api/v1/vaults`
 - `GET /api/v1/vaults/:vaultId`
 - `POST /api/v1/vaults/:vaultId/items`
 - `PATCH /api/v1/vaults/:vaultId/items/:itemId`
 - `GET /api/v1/vaults/:vaultId/export`
 
-No delete endpoints are included. No vault-creation endpoint is included.
+No vault-creation endpoint is included.
 
 ## Versioned routing
 
@@ -37,6 +46,15 @@ The handler dispatches by path segment so the backend can stay small while the c
   package.json           # backend package metadata
   PROGRESS.md            # status snapshot for this scaffold
 ```
+
+## Authentication split
+
+`/api/v1/keys` is intentionally separate from the API-key-protected vault routes:
+
+- management requests must send `Authorization: Bearer <supabase-session-jwt>`
+- vault data requests continue to use `Authorization: Bearer rhk_<publicId>_<secret>` or `X-API-Key`
+- management handlers verify the Supabase JWT first, then use the service-role client only for server-side CRUD after ownership checks
+- API-key issuance stays server-side so plaintext key material never has to be reconstructed from stored data
 
 ## Required environment variables
 
@@ -97,6 +115,72 @@ For writes, v1 follows the current shared-vault pattern:
 3. attach `publication_tags` against the `vault_publication_id`
 
 ## Endpoint contract
+
+### `GET /api/v1/keys`
+
+Authentication: Supabase session JWT
+
+Returns API keys owned by the authenticated user.
+
+Response shape:
+
+```json
+{
+  "data": [
+    {
+      "id": "uuid",
+      "label": "research_sync_bot",
+      "description": "Local sync job",
+      "key_prefix": "rhk_a1b2c3d4e5f6",
+      "scopes": ["vaults:read"],
+      "expires_at": null,
+      "revoked_at": null,
+      "last_used_at": null,
+      "created_at": "2026-03-24T08:30:00Z",
+      "vault_ids": ["uuid"]
+    }
+  ],
+  "meta": {
+    "request_id": "uuid"
+  }
+}
+```
+
+### `POST /api/v1/keys`
+
+Authentication: Supabase session JWT
+
+Request body:
+
+```json
+{
+  "label": "research_sync_bot",
+  "description": "Local sync job",
+  "scopes": ["vaults:read", "vaults:write"],
+  "expires_at": "2026-06-22T08:30:00.000Z",
+  "vault_ids": ["uuid"]
+}
+```
+
+Rules:
+
+- `label` is required
+- `scopes` must be a non-empty subset of `vaults:read`, `vaults:write`, `vaults:export`
+- `expires_at` is optional but must be a future ISO-8601 timestamp when present
+- `vault_ids` is optional; when present every vault must already be accessible to the authenticated user through ownership or sharing
+- response returns the plaintext key once as `secret`; only the hash is stored
+
+### `POST /api/v1/keys/:keyId/revoke`
+
+Authentication: Supabase session JWT
+
+Revokes a key owned by the authenticated user and returns the updated record.
+
+### `DELETE /api/v1/keys/:keyId`
+
+Authentication: Supabase session JWT
+
+Alias for revoke to match clients that prefer `DELETE`. The record is soft-revoked by setting `revoked_at`; it is not deleted from storage.
 
 ### `GET /api/v1/vaults`
 

@@ -1,0 +1,11 @@
+# Local Netlify folder
+.netlify
+
+# node_modules
+node_modules
+
+# .env files
+.env
+
+# Claude
+.claude

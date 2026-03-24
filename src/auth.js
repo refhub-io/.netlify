@@ -2,23 +2,37 @@ import crypto from "node:crypto";
 import { createClient } from "@supabase/supabase-js";
 import { getConfig } from "./config.js";
 
+const VAULT_SELECT =
+  "id, user_id, name, description, color, public_slug, category, abstract, created_at, updated_at, visibility";
+
 export const API_SCOPES = {
   READ: "vaults:read",
   WRITE: "vaults:write",
   EXPORT: "vaults:export",
 };
 
+const MANAGEMENT_SCOPES = new Set(Object.values(API_SCOPES));
+
 function hashApiKey(rawKey, pepper) {
   return crypto.createHash("sha256").update(`${pepper}:${rawKey}`).digest("hex");
 }
 
-function getPresentedApiKey(headers) {
-  const authorization = headers.authorization || headers.Authorization;
+function getBearerToken(headers) {
+  const authorization = headers.authorization;
   if (authorization?.startsWith("Bearer ")) {
     return authorization.slice("Bearer ".length).trim();
   }
 
-  return headers["x-api-key"] || headers["X-API-Key"] || null;
+  return null;
+}
+
+function getPresentedApiKey(headers) {
+  const bearerToken = getBearerToken(headers);
+  if (bearerToken) {
+    return bearerToken;
+  }
+
+  return headers["x-api-key"] || null;
 }
 
 function parseApiKey(rawKey) {
@@ -47,7 +61,10 @@ export function getSupabaseAdmin() {
 export async function authenticateApiKey(event) {
   const config = getConfig();
   const supabase = getSupabaseAdmin();
-  const rawKey = getPresentedApiKey(event.headers || {});
+  const headers = Object.fromEntries(
+    Object.entries(event.headers || {}).map(([key, value]) => [key.toLowerCase(), value]),
+  );
+  const rawKey = getPresentedApiKey(headers);
   if (!rawKey) {
     return { error: "missing_api_key" };
   }
@@ -85,14 +102,23 @@ export async function authenticateApiKey(event) {
 
   const vaultIds = (data.api_key_vaults || []).map((entry) => entry.vault_id);
 
-  await supabase
+  const lastUsedResult = await supabase
     .from("api_keys")
     .update({ last_used_at: new Date().toISOString() })
     .eq("id", data.id);
 
+  if (lastUsedResult.error) {
+    console.error("Failed to update api_keys.last_used_at", {
+      keyId: data.id,
+      code: lastUsedResult.error.code,
+      message: lastUsedResult.error.message,
+    });
+  }
+
   return {
     supabase,
     principal: {
+      authType: "api_key",
       keyId: data.id,
       userId: data.owner_user_id,
       label: data.label,
@@ -100,6 +126,50 @@ export async function authenticateApiKey(event) {
       restrictedVaultIds: vaultIds.length > 0 ? new Set(vaultIds) : null,
     },
   };
+}
+
+export async function authenticateManagementUser(event) {
+  const headers = Object.fromEntries(
+    Object.entries(event.headers || {}).map(([key, value]) => [key.toLowerCase(), value]),
+  );
+  const accessToken = getBearerToken(headers);
+  if (!accessToken) {
+    return { error: "missing_bearer_token" };
+  }
+
+  const supabase = getSupabaseAdmin();
+  const { data, error } = await supabase.auth.getUser(accessToken);
+  if (error || !data?.user) {
+    return { error: "invalid_bearer_token" };
+  }
+
+  return {
+    supabase,
+    principal: {
+      authType: "management_user",
+      userId: data.user.id,
+      email: data.user.email || null,
+    },
+  };
+}
+
+export function createApiKeySecret() {
+  const publicId = crypto.randomBytes(6).toString("hex");
+  const secret = crypto.randomBytes(24).toString("hex");
+  const rawKey = `rhk_${publicId}_${secret}`;
+
+  return {
+    rawKey,
+    keyPrefix: `rhk_${publicId}`,
+  };
+}
+
+export function hashManagedApiKey(rawKey) {
+  return hashApiKey(rawKey, getConfig().apiKeyPepper);
+}
+
+export function isValidApiKeyScope(scope) {
+  return MANAGEMENT_SCOPES.has(scope);
 }
 
 export function requireScope(principal, scope) {
@@ -119,7 +189,7 @@ export async function resolveVaultAccess(supabase, principal, vaultId, requiredP
 
   const { data: vault, error } = await supabase
     .from("vaults")
-    .select("*")
+    .select(VAULT_SELECT)
     .eq("id", vaultId)
     .maybeSingle();
 
@@ -147,7 +217,7 @@ export async function resolveVaultAccess(supabase, principal, vaultId, requiredP
   }
 
   if (!permission || permissionRank(permission) < permissionRank(requiredPermission)) {
-    return { ok: false, status: 403, code: "insufficient_vault_access", vault };
+    return { ok: false, status: 403, code: "insufficient_vault_access" };
   }
 
   return { ok: true, vault, permission };

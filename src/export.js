@@ -1,6 +1,21 @@
+function sanitizeBibtexToken(value, fallback) {
+  const token = String(value || "")
+    .toLowerCase()
+    .replace(/[^a-z0-9:_-]/g, "");
+
+  return token || fallback;
+}
+
+function escapeBibtexValue(value) {
+  return String(value)
+    .replace(/\\/g, "\\\\")
+    .replace(/\r?\n+/g, " ")
+    .replace(/[{}]/g, "\\$&");
+}
+
 function generateBibtexKey(publication) {
   if (publication.bibtex_key) {
-    return publication.bibtex_key;
+    return sanitizeBibtexToken(publication.bibtex_key, "refhub");
   }
 
   const firstAuthor = publication.authors?.[0] || "unknown";
@@ -9,7 +24,7 @@ function generateBibtexKey(publication) {
   const titleWord =
     publication.title?.split(" ")[0]?.toLowerCase().replace(/[^a-z0-9]/g, "") || "untitled";
 
-  return `${lastName}${year}${titleWord}`;
+  return sanitizeBibtexToken(`${lastName}${year}${titleWord}`, "refhub");
 }
 
 function publicationToBibtex(publication) {
@@ -44,11 +59,11 @@ function publicationToBibtex(publication) {
 
   for (const [field, value] of mapping) {
     if (value !== null && value !== undefined && value !== "") {
-      fields.push(`  ${field} = {${value}}`);
+      fields.push(`  ${field} = {${escapeBibtexValue(value)}}`);
     }
   }
 
-  const type = publication.publication_type || "article";
+  const type = sanitizeBibtexToken(publication.publication_type || "article", "article");
   const key = generateBibtexKey(publication);
 
   return `@${type}{${key},\n${fields.join(",\n")}\n}`;

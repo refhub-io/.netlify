@@ -10,6 +10,13 @@
 - initial handlers for list vaults, read vault, add items, update items, and export vault
 - Supabase migration for `api_keys`, `api_key_vaults`, and `api_request_audit_logs`
 
+## Delegated status
+
+- 2026-03-24 07:50 CET: backend hardening pass started on branch `chore/backend-hardening-2026-03-24`
+- 2026-03-24 07:50 CET: implementing priority fixes for error leakage, 4xx validation handling, bulk-write failure semantics, audit-log resilience, and API-key consistency
+- 2026-03-24 08:02 CET: syntax checks passed via `npm run check`; helper smoke checks passed for JSON/body-size parsing and BibTeX sanitization
+- 2026-03-24 08:05 CET: hardening patch finalized after diff review; branch ready for commit and push
+
 ## Still pending
 
 - key issuance UI or admin workflow for generating `rhk_<publicId>_<secret>` values

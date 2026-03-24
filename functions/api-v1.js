@@ -4,6 +4,7 @@ import { serializeVaultExport } from "../src/export.js";
 import {
   createRequestContext,
   errorResponse,
+  getRequestBodySize,
   getRouteSegments,
   json,
   parseJsonBody,
@@ -43,6 +44,44 @@ const PUBLICATION_FIELDS = [
   "keywords",
 ];
 
+const VAULT_SELECT =
+  "id, user_id, name, description, color, public_slug, category, abstract, created_at, updated_at, visibility";
+const VAULT_PUBLICATION_SELECT = [
+  "id",
+  "vault_id",
+  "original_publication_id",
+  "created_by",
+  "version",
+  "created_at",
+  "updated_at",
+  ...PUBLICATION_FIELDS,
+].join(", ");
+
+function toSafeErrorResponse(error, requestId) {
+  if (error?.code === "invalid_tag_ids") {
+    return errorResponse(400, "invalid_tag_ids", error.message, requestId);
+  }
+
+  return errorResponse(500, "internal_error", "Unexpected server error", requestId);
+}
+
+function getAuthFailureMessage(code) {
+  if (code === "missing_api_key") {
+    return "API key is required";
+  }
+  if (code === "invalid_api_key_format") {
+    return "API key format is invalid";
+  }
+  if (code === "expired_api_key") {
+    return "API key has expired";
+  }
+  if (code === "revoked_api_key") {
+    return "API key has been revoked";
+  }
+
+  return "API key authentication failed";
+}
+
 function pickPublicationFields(input) {
   const row = {};
 
@@ -79,7 +118,7 @@ async function writeAuditLog(supabase, context, principal, response, metadata = 
 
   const durationMs = Date.now() - context.startedAt;
 
-  await supabase.from("api_request_audit_logs").insert({
+  const auditResult = await supabase.from("api_request_audit_logs").insert({
     api_key_id: principal.keyId,
     owner_user_id: principal.userId,
     request_id: context.requestId,
@@ -91,12 +130,16 @@ async function writeAuditLog(supabase, context, principal, response, metadata = 
     duration_ms: durationMs,
     metadata,
   });
+
+  if (auditResult.error) {
+    throw auditResult.error;
+  }
 }
 
 async function loadVaultContents(supabase, vaultId) {
   const { data: publications, error: publicationsError } = await supabase
     .from("vault_publications")
-    .select("*")
+    .select(VAULT_PUBLICATION_SELECT)
     .eq("vault_id", vaultId)
     .order("created_at", { ascending: true });
 
@@ -161,7 +204,7 @@ async function handleListVaults(supabase, principal, context) {
 
   const ownedResult = await supabase
     .from("vaults")
-    .select("id, user_id, name, description, color, public_slug, category, abstract, created_at, updated_at, visibility")
+    .select(VAULT_SELECT)
     .eq("user_id", principal.userId)
     .order("updated_at", { ascending: false });
 
@@ -184,7 +227,7 @@ async function handleListVaults(supabase, principal, context) {
   if (sharedVaultIds.length > 0) {
     const vaultResult = await supabase
       .from("vaults")
-      .select("id, user_id, name, description, color, public_slug, category, abstract, created_at, updated_at, visibility")
+      .select(VAULT_SELECT)
       .in("id", sharedVaultIds);
 
     if (vaultResult.error) {
@@ -299,8 +342,12 @@ async function handleAddItems(supabase, principal, context, vaultId, event) {
     return errorResponse(access.status, access.code, "Vault write access denied", context.requestId);
   }
 
-  const body = parseJsonBody(event);
-  const items = body?.items;
+  const parsedBody = parseJsonBody(event);
+  if (!parsedBody.ok) {
+    return errorResponse(400, "invalid_json", "Request body must be valid JSON", context.requestId);
+  }
+
+  const items = parsedBody.value?.items;
   const { maxBulkItems } = getConfig();
 
   if (!Array.isArray(items) || items.length === 0) {
@@ -311,56 +358,135 @@ async function handleAddItems(supabase, principal, context, vaultId, event) {
     return errorResponse(400, "too_many_items", `Maximum bulk size is ${maxBulkItems}`, context.requestId);
   }
 
-  const created = [];
   for (const item of items) {
     if (!item?.title || typeof item.title !== "string") {
       return errorResponse(400, "invalid_item", "Each item must include a title", context.requestId);
     }
+  }
 
+  const normalizedItems = [];
+  for (const item of items) {
     const tagIds = await validateVaultTagIds(supabase, vaultId, item.tag_ids || []);
-    const publicationRow = pickPublicationFields(item);
-    publicationRow.user_id = principal.userId;
-
-    const publicationInsert = await supabase
-      .from("publications")
-      .insert(publicationRow)
-      .select("*")
-      .single();
-
-    if (publicationInsert.error) {
-      throw publicationInsert.error;
-    }
-
-    const vaultPublicationInsert = await supabase
-      .from("vault_publications")
-      .insert({
+    normalizedItems.push({
+      tagIds,
+      publicationRow: {
+        ...pickPublicationFields(item),
+        user_id: principal.userId,
+      },
+      vaultPublicationRow: {
         vault_id: vaultId,
-        original_publication_id: publicationInsert.data.id,
         created_by: principal.userId,
         version: 1,
         ...pickPublicationFields(item),
-      })
-      .select("*")
-      .single();
+      },
+    });
+  }
 
-    if (vaultPublicationInsert.error) {
-      throw vaultPublicationInsert.error;
-    }
+  const created = [];
+  const createdPublicationIds = [];
+  const createdVaultPublicationIds = [];
 
-    if (tagIds.length > 0) {
-      const tagRows = tagIds.map((tagId) => ({
-        publication_id: null,
-        vault_publication_id: vaultPublicationInsert.data.id,
-        tag_id: tagId,
-      }));
+  try {
+    for (const { tagIds, publicationRow, vaultPublicationRow } of normalizedItems) {
+      const publicationInsert = await supabase
+        .from("publications")
+        .insert(publicationRow)
+        .select("id")
+        .single();
 
-      const tagInsert = await supabase.from("publication_tags").insert(tagRows);
-      if (tagInsert.error) {
-        throw tagInsert.error;
+      if (publicationInsert.error) {
+        throw publicationInsert.error;
       }
+
+      createdPublicationIds.push(publicationInsert.data.id);
+
+      const vaultPublicationInsert = await supabase
+        .from("vault_publications")
+        .insert({
+          ...vaultPublicationRow,
+          original_publication_id: publicationInsert.data.id,
+        })
+        .select(VAULT_PUBLICATION_SELECT)
+        .single();
+
+      if (vaultPublicationInsert.error) {
+        throw vaultPublicationInsert.error;
+      }
+
+      createdVaultPublicationIds.push(vaultPublicationInsert.data.id);
+
+      if (tagIds.length > 0) {
+        const tagRows = tagIds.map((tagId) => ({
+          publication_id: null,
+          vault_publication_id: vaultPublicationInsert.data.id,
+          tag_id: tagId,
+        }));
+
+        const tagInsert = await supabase.from("publication_tags").insert(tagRows);
+        if (tagInsert.error) {
+          throw tagInsert.error;
+        }
+      }
+
+      created.push(vaultPublicationInsert.data);
+    }
+  } catch (error) {
+    let rollbackFailed = false;
+
+    if (createdVaultPublicationIds.length > 0) {
+      const tagDeleteResult = await supabase
+        .from("publication_tags")
+        .delete()
+        .in("vault_publication_id", createdVaultPublicationIds);
+      rollbackFailed = rollbackFailed || Boolean(tagDeleteResult.error);
     }
 
-    created.push(vaultPublicationInsert.data);
+    if (createdVaultPublicationIds.length > 0) {
+      const vaultDeleteResult = await supabase
+        .from("vault_publications")
+        .delete()
+        .in("id", createdVaultPublicationIds);
+      rollbackFailed = rollbackFailed || Boolean(vaultDeleteResult.error);
+    }
+
+    if (createdPublicationIds.length > 0) {
+      const publicationDeleteResult = await supabase
+        .from("publications")
+        .delete()
+        .in("id", createdPublicationIds);
+      rollbackFailed = rollbackFailed || Boolean(publicationDeleteResult.error);
+    }
+
+    if (rollbackFailed) {
+      console.error("Bulk insert rollback failed", {
+        requestId: context.requestId,
+        vaultId,
+        createdPublicationIds,
+        createdVaultPublicationIds,
+        code: error?.code,
+      });
+
+      return errorResponse(
+        500,
+        "bulk_insert_partial_failure",
+        "Bulk insert failed after partial writes; manual reconciliation may be required",
+        context.requestId,
+      );
+    }
+
+    console.error("Bulk insert failed and was rolled back", {
+      requestId: context.requestId,
+      vaultId,
+      itemCount: normalizedItems.length,
+      code: error?.code,
+    });
+
+    return errorResponse(
+      500,
+      "bulk_insert_failed",
+      "Bulk insert failed and all staged writes were rolled back",
+      context.requestId,
+    );
   }
 
   return json(201, {
@@ -382,12 +508,17 @@ async function handleUpdateItem(supabase, principal, context, vaultId, itemId, e
     return errorResponse(access.status, access.code, "Vault write access denied", context.requestId);
   }
 
-  const body = parseJsonBody(event) || {};
+  const parsedBody = parseJsonBody(event);
+  if (!parsedBody.ok) {
+    return errorResponse(400, "invalid_json", "Request body must be valid JSON", context.requestId);
+  }
+
+  const body = parsedBody.value || {};
   const updateRow = pickPublicationFields(body);
 
   const existingResult = await supabase
     .from("vault_publications")
-    .select("*")
+    .select(VAULT_PUBLICATION_SELECT)
     .eq("id", itemId)
     .eq("vault_id", vaultId)
     .maybeSingle();
@@ -440,7 +571,7 @@ async function handleUpdateItem(supabase, principal, context, vaultId, itemId, e
 
   const refreshed = await supabase
     .from("vault_publications")
-    .select("*")
+    .select(VAULT_PUBLICATION_SELECT)
     .eq("id", itemId)
     .single();
 
@@ -503,9 +634,16 @@ export async function handler(event) {
       };
     }
 
+    const { maxBodyBytes } = getConfig();
+    if (getRequestBodySize(event) > maxBodyBytes) {
+      return errorResponse(413, "request_too_large", `Request body exceeds ${maxBodyBytes} bytes`, context.requestId);
+    }
+
     const authResult = await authenticateApiKey(event);
     if (authResult.error) {
-      return errorResponse(401, authResult.error, "API key authentication failed", context.requestId);
+      return errorResponse(401, authResult.error, getAuthFailureMessage(authResult.error), context.requestId, {
+        auth_scheme: "Bearer",
+      });
     }
 
     supabase = authResult.supabase;
@@ -526,17 +664,29 @@ export async function handler(event) {
       response = errorResponse(404, "route_not_found", "Route not found", context.requestId);
     }
   } catch (error) {
-    response = errorResponse(
-      500,
-      error.code || "internal_error",
-      error.message || "Unexpected server error",
-      context.requestId,
-    );
+    console.error("Unhandled RefHub API error", {
+      requestId: context.requestId,
+      path: context.path,
+      method: context.method,
+      code: error?.code,
+      message: error?.message,
+    });
+    response = toSafeErrorResponse(error, context.requestId);
   }
 
-  await writeAuditLog(supabase, context, principal, response, {
-    route: event.path || "/",
-  });
+  try {
+    await writeAuditLog(supabase, context, principal, response, {
+      route: event.path || "/",
+    });
+  } catch (error) {
+    console.error("Audit log write failed", {
+      requestId: context.requestId,
+      path: context.path,
+      method: context.method,
+      code: error?.code,
+      message: error?.message,
+    });
+  }
 
   return response;
 }

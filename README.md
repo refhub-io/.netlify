@@ -44,6 +44,7 @@ The handler dispatches by path segment so the backend can stay small while the c
 - `SUPABASE_SERVICE_ROLE_KEY`
 - `REFHUB_API_KEY_PEPPER`
 - `REFHUB_API_MAX_BULK_ITEMS` optional, defaults to `50`
+- `REFHUB_API_MAX_BODY_BYTES` optional, defaults to `262144`
 - `REFHUB_API_AUDIT_DISABLED` optional, defaults to `false`
 
 `REFHUB_API_KEY_PEPPER` is used when hashing presented API keys before comparing them to the stored hash.
@@ -63,6 +64,19 @@ Storage rules:
 - optional vault restrictions live in `api_key_vaults`
 - `last_used_at` is updated best-effort
 - request outcomes are written best-effort to `api_request_audit_logs`
+
+## Security assumptions
+
+The Netlify function uses the Supabase service-role key, so database RLS is not the primary enforcement layer for this API path.
+
+Access control is enforced in the function by:
+
+- API-key hash verification
+- scope checks
+- explicit vault restriction checks through `api_key_vaults`
+- owner/share permission checks before read, write, or export operations
+
+If this backend later moves away from the service-role key, keep these checks and validate RLS separately.
 
 ## Existing RefHub data model reused
 
@@ -150,6 +164,8 @@ Notes:
 - bulk insert is supported to reduce chattiness
 - `tag_ids` must already exist in the target vault
 - v1 does not create tags implicitly
+- requests above `REFHUB_API_MAX_BODY_BYTES` are rejected with `413`
+- the handler pre-validates the full batch and attempts rollback on downstream insert failures, but true atomicity still requires a database transaction or RPC
 
 ### `PATCH /api/v1/vaults/:vaultId/items/:itemId`
 
@@ -184,3 +200,5 @@ Each request attempts to write one audit row with:
 - caller IP and user agent
 
 Audit logging is best-effort and must not block successful API responses.
+
+If audit logging fails, the response still returns and the failure is emitted to function logs for follow-up.

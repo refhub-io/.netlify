@@ -1,0 +1,170 @@
+const DEFAULT_RECOMMENDATION_LIMIT = 10;
+const MAX_RECOMMENDATION_LIMIT = 25;
+const SEMANTIC_SCHOLAR_RECOMMENDATION_FIELDS = [
+  "paperId",
+  "externalIds",
+  "url",
+  "title",
+  "abstract",
+  "year",
+  "venue",
+  "authors",
+  "citationCount",
+  "openAccessPdf",
+];
+
+function createSemanticScholarError(code, message, status, details = undefined) {
+  const error = new Error(message);
+  error.code = code;
+  error.status = status;
+  error.details = details;
+  return error;
+}
+
+function normalizeAuthor(author) {
+  if (!author || typeof author !== "object") {
+    return null;
+  }
+
+  return {
+    author_id: author.authorId || null,
+    name: author.name || null,
+  };
+}
+
+function normalizeRecommendedPaper(paper) {
+  return {
+    paper_id: paper.paperId || null,
+    external_ids: paper.externalIds || {},
+    title: paper.title || null,
+    abstract: paper.abstract || null,
+    year: paper.year || null,
+    venue: paper.venue || null,
+    url: paper.url || null,
+    citation_count: paper.citationCount ?? null,
+    open_access_pdf_url: paper.openAccessPdf?.url || null,
+    authors: Array.isArray(paper.authors) ? paper.authors.map(normalizeAuthor).filter(Boolean) : [],
+  };
+}
+
+export function isRefHubApiKeyValue(value) {
+  return typeof value === "string" && /^rhk_[^_]+_[^_]+$/.test(value.trim());
+}
+
+export function normalizeRecommendationRequest(body) {
+  const seedPaperId = typeof body?.paper_id === "string" ? body.paper_id.trim() : "";
+  if (!seedPaperId) {
+    return {
+      error: "invalid_paper_id",
+      message: "Body must include a non-empty paper_id string",
+    };
+  }
+
+  const rawLimit = body?.limit;
+  if (rawLimit === undefined || rawLimit === null || rawLimit === "") {
+    return {
+      value: {
+        seedPaperId,
+        limit: DEFAULT_RECOMMENDATION_LIMIT,
+      },
+    };
+  }
+
+  if (!Number.isInteger(rawLimit)) {
+    return {
+      error: "invalid_limit",
+      message: `limit must be an integer between 1 and ${MAX_RECOMMENDATION_LIMIT}`,
+    };
+  }
+
+  if (rawLimit < 1 || rawLimit > MAX_RECOMMENDATION_LIMIT) {
+    return {
+      error: "invalid_limit",
+      message: `limit must be an integer between 1 and ${MAX_RECOMMENDATION_LIMIT}`,
+    };
+  }
+
+  return {
+    value: {
+      seedPaperId,
+      limit: rawLimit,
+    },
+  };
+}
+
+export async function fetchSemanticScholarRecommendations({ apiKey, seedPaperId, limit, signal }) {
+  const url = new URL("https://api.semanticscholar.org/recommendations/v1/papers");
+  url.searchParams.set("fields", SEMANTIC_SCHOLAR_RECOMMENDATION_FIELDS.join(","));
+  url.searchParams.set("limit", String(limit));
+
+  const headers = {
+    "content-type": "application/json",
+    accept: "application/json",
+  };
+
+  if (apiKey) {
+    headers["x-api-key"] = apiKey;
+  }
+
+  let response;
+  try {
+    response = await fetch(url, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        positivePaperIds: [seedPaperId],
+        negativePaperIds: [],
+      }),
+      signal,
+    });
+  } catch (error) {
+    if (error?.name === "TimeoutError" || error?.name === "AbortError") {
+      throw createSemanticScholarError(
+        "semantic_scholar_timeout",
+        "Semantic Scholar request timed out",
+        504,
+      );
+    }
+
+    throw createSemanticScholarError(
+      "semantic_scholar_unreachable",
+      "Semantic Scholar request could not be completed",
+      502,
+    );
+  }
+
+  if (response.status === 404) {
+    throw createSemanticScholarError(
+      "paper_not_found",
+      "Semantic Scholar seed paper was not found",
+      404,
+      { paper_id: seedPaperId },
+    );
+  }
+
+  if (response.status === 429) {
+    throw createSemanticScholarError(
+      "semantic_scholar_rate_limited",
+      "Semantic Scholar rate limit exceeded",
+      503,
+    );
+  }
+
+  if (!response.ok) {
+    const responseText = await response.text().catch(() => "");
+    throw createSemanticScholarError(
+      "semantic_scholar_error",
+      "Semantic Scholar request failed",
+      502,
+      {
+        upstream_status: response.status,
+        upstream_body: responseText.slice(0, 200),
+      },
+    );
+  }
+
+  const payload = await response.json();
+  const recommendedPapers = Array.isArray(payload?.recommendedPapers) ? payload.recommendedPapers : [];
+
+  return recommendedPapers.map(normalizeRecommendedPaper);
+}

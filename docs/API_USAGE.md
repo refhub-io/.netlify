@@ -32,6 +32,7 @@ Use a normal authenticated Supabase user session JWT for:
 - listing keys
 - creating keys
 - revoking keys
+- fetching Semantic Scholar recommendations for the add/edit paper dialog
 
 Send it as:
 
@@ -89,6 +90,63 @@ Item writes are covered by `vaults:write`.
 ## Management routes
 
 These routes require a **Supabase session JWT**.
+
+### Paper recommendations
+
+`POST /api/v1/recommendations`
+
+This route is intended for the logged-in RefHub frontend. It does **not** use RefHub API-key auth and will reject `rhk_...` credentials.
+
+```bash
+curl -s \
+  -X POST \
+  -H "Authorization: Bearer $JWT" \
+  -H "Content-Type: application/json" \
+  https://refhub-api.netlify.app/api/v1/recommendations \
+  -d '{
+    "paper_id": "DOI:10.1101/2020.02.20.958025",
+    "limit": 10
+  }'
+```
+
+Request rules:
+
+- `paper_id` is required and must be a non-empty Semantic Scholar-compatible paper identifier
+- `limit` is optional and must be an integer from `1` to `25`
+- the backend calls Semantic Scholar server-side and keeps any configured `SEMANTIC_SCHOLAR_API_KEY` on the server
+
+Example response:
+
+```json
+{
+  "data": [
+    {
+      "paper_id": "52cdb6ed946dfed25113bd194d5e2bb843c66331",
+      "external_ids": {
+        "DOI": "10.1101/2020.11.04.367797"
+      },
+      "title": "Example paper",
+      "abstract": "...",
+      "year": 2020,
+      "venue": "bioRxiv",
+      "url": "https://www.semanticscholar.org/paper/...",
+      "citation_count": 42,
+      "open_access_pdf_url": "https://...",
+      "authors": [
+        {
+          "author_id": "12345",
+          "name": "Example Author"
+        }
+      ]
+    }
+  ],
+  "meta": {
+    "request_id": "uuid",
+    "paper_id": "DOI:10.1101/2020.02.20.958025",
+    "limit": 10
+  }
+}
+```
 
 ### List API keys
 

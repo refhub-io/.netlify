@@ -21,6 +21,17 @@ import {
   text,
   withCors,
 } from "../src/http.js";
+import {
+  fetchSemanticScholarCitations,
+  fetchSemanticScholarDoiMetadata,
+  fetchSemanticScholarPaperLookup,
+  fetchSemanticScholarRecommendations,
+  fetchSemanticScholarReferences,
+  isRefHubApiKeyValue,
+  normalizePaperListRequest,
+  normalizePaperLookupRequest,
+  normalizeSemanticScholarDoiRequest,
+} from "../src/semantic-scholar.js";
 
 const PUBLICATION_FIELDS = [
   "title",
@@ -69,13 +80,179 @@ const VAULT_PUBLICATION_SELECT = [
   "updated_at",
   ...PUBLICATION_FIELDS,
 ].join(", ");
+const SEMANTIC_SCHOLAR_CACHE_TTL_MS = 60 * 1000;
+const SEMANTIC_SCHOLAR_RATE_LIMIT_WINDOW_MS = 60 * 1000;
+const SEMANTIC_SCHOLAR_RATE_LIMIT_MAX_REQUESTS = 12;
+const semanticScholarResponseCache = new Map();
+const semanticScholarRateLimitBuckets = new Map();
 
 function toSafeErrorResponse(error, requestId) {
   if (error?.code === "invalid_tag_ids") {
     return errorResponse(400, "invalid_tag_ids", error.message, requestId);
   }
 
+  if (error?.code === "paper_not_found") {
+    return errorResponse(error.status || 404, error.code, error.message, requestId, error.details);
+  }
+
+  if (["semantic_scholar_rate_limited", "semantic_scholar_error", "semantic_scholar_timeout", "semantic_scholar_unreachable"]
+    .includes(error?.code)) {
+    return errorResponse(error.status || 502, error.code, error.message, requestId);
+  }
+
   return errorResponse(500, "internal_error", "Unexpected server error", requestId);
+}
+
+function pruneSemanticScholarState(now = Date.now()) {
+  for (const [key, entry] of semanticScholarResponseCache.entries()) {
+    if (!entry.promise && entry.expiresAt <= now) {
+      semanticScholarResponseCache.delete(key);
+    }
+  }
+
+  for (const [key, bucket] of semanticScholarRateLimitBuckets.entries()) {
+    if (bucket.resetAt <= now) {
+      semanticScholarRateLimitBuckets.delete(key);
+    }
+  }
+}
+
+function takeSemanticScholarRateLimit(userId, now = Date.now()) {
+  pruneSemanticScholarState(now);
+
+  const bucketKey = userId || "anonymous";
+  const existing = semanticScholarRateLimitBuckets.get(bucketKey);
+  if (!existing || existing.resetAt <= now) {
+    semanticScholarRateLimitBuckets.set(bucketKey, {
+      count: 1,
+      resetAt: now + SEMANTIC_SCHOLAR_RATE_LIMIT_WINDOW_MS,
+    });
+    return { allowed: true };
+  }
+
+  if (existing.count >= SEMANTIC_SCHOLAR_RATE_LIMIT_MAX_REQUESTS) {
+    return {
+      allowed: false,
+      retryAfterSeconds: Math.max(1, Math.ceil((existing.resetAt - now) / 1000)),
+    };
+  }
+
+  existing.count += 1;
+  return { allowed: true };
+}
+
+function getCachedSemanticScholarValue(cacheKey, now = Date.now()) {
+  pruneSemanticScholarState(now);
+
+  const existing = semanticScholarResponseCache.get(cacheKey);
+  if (existing?.value && existing.expiresAt > now) {
+    return { hit: true, value: existing.value };
+  }
+
+  if (existing?.promise) {
+    return { hit: true, value: existing.promise };
+  }
+
+  return { hit: false, value: null };
+}
+
+async function getCachedSemanticScholarResponse(cacheKey, fetcher, now = Date.now()) {
+  pruneSemanticScholarState(now);
+
+  const existing = semanticScholarResponseCache.get(cacheKey);
+  if (existing?.value && existing.expiresAt > now) {
+    return existing.value;
+  }
+
+  if (existing?.promise) {
+    return existing.promise;
+  }
+
+  const promise = (async () => {
+    try {
+      const value = await fetcher();
+      semanticScholarResponseCache.set(cacheKey, {
+        value,
+        expiresAt: Date.now() + SEMANTIC_SCHOLAR_CACHE_TTL_MS,
+      });
+      return value;
+    } catch (error) {
+      semanticScholarResponseCache.delete(cacheKey);
+      throw error;
+    }
+  })();
+
+  semanticScholarResponseCache.set(cacheKey, {
+    promise,
+    expiresAt: now + SEMANTIC_SCHOLAR_CACHE_TTL_MS,
+  });
+
+  return promise;
+}
+
+async function handleSemanticScholarPaperRoute(context, event, principal, routeName, fetcher) {
+  const parsedBody = parseJsonBody(event);
+  if (!parsedBody.ok) {
+    return errorResponse(400, "invalid_json", "Request body must be valid JSON", context.requestId);
+  }
+
+  const normalizedRequest = normalizePaperListRequest(parsedBody.value || {});
+  if (normalizedRequest.error) {
+    return errorResponse(400, normalizedRequest.error, normalizedRequest.message, context.requestId);
+  }
+
+  const { seedPaperId, limit } = normalizedRequest.value;
+  const cacheKey = `${routeName}:${seedPaperId}:${limit}`;
+  const cached = getCachedSemanticScholarValue(cacheKey);
+  const papers = cached.hit
+    ? await cached.value
+    : await (async () => {
+      const rateLimit = takeSemanticScholarRateLimit(principal?.userId);
+      if (!rateLimit.allowed) {
+        return json(
+          429,
+          {
+            error: {
+              code: "rate_limit_exceeded",
+              message: "Too many Semantic Scholar requests; please retry shortly",
+              details: {
+                retry_after_seconds: rateLimit.retryAfterSeconds,
+              },
+            },
+            meta: {
+              request_id: context.requestId,
+            },
+          },
+          {
+            "retry-after": String(rateLimit.retryAfterSeconds),
+          },
+        );
+      }
+
+      const { semanticScholarApiKey } = getConfig();
+      const timeout = AbortSignal.timeout(8000);
+      return getCachedSemanticScholarResponse(cacheKey, () =>
+        fetcher({
+          apiKey: semanticScholarApiKey,
+          seedPaperId,
+          limit,
+          signal: timeout,
+        })
+      );
+    })();
+
+  if (papers?.statusCode) {
+    return papers;
+  }
+
+  return json(200, {
+    data: papers,
+    meta: {
+      request_id: context.requestId,
+      paper_id: seedPaperId,
+      limit,
+    },
+  });
 }
 
 function getAuthFailureMessage(code) {
@@ -98,6 +275,10 @@ function getAuthFailureMessage(code) {
 function getManagementAuthFailureMessage(code) {
   if (code === "missing_bearer_token") {
     return "Bearer token is required";
+  }
+
+  if (code === "refhub_api_key_not_supported") {
+    return "RefHub API keys are not supported for this route";
   }
 
   if (code === "invalid_bearer_token") {
@@ -383,6 +564,153 @@ async function handleRevokeApiKey(supabase, principal, context, keyId) {
     },
   });
 }
+
+async function handlePaperRecommendations(context, event, principal) {
+  return handleSemanticScholarPaperRoute(
+    context,
+    event,
+    principal,
+    "recommendations",
+    fetchSemanticScholarRecommendations,
+  );
+}
+
+async function handlePaperReferences(context, event, principal) {
+  return handleSemanticScholarPaperRoute(context, event, principal, "references", fetchSemanticScholarReferences);
+}
+
+async function handlePaperCitations(context, event, principal) {
+  return handleSemanticScholarPaperRoute(context, event, principal, "citations", fetchSemanticScholarCitations);
+}
+
+async function handlePaperLookup(context, event, principal) {
+  const parsedBody = parseJsonBody(event);
+  if (!parsedBody.ok) {
+    return errorResponse(400, "invalid_json", "Request body must be valid JSON", context.requestId);
+  }
+
+  const normalizedRequest = normalizePaperLookupRequest(parsedBody.value || {});
+  if (normalizedRequest.error) {
+    return errorResponse(400, normalizedRequest.error, normalizedRequest.message, context.requestId);
+  }
+
+  const { queryType, queryValue } = normalizedRequest.value;
+  const cacheKey = `lookup:${queryType}:${queryValue}`;
+  const cached = getCachedSemanticScholarValue(cacheKey);
+  const paperId = cached.hit
+    ? await cached.value
+    : await (async () => {
+      const rateLimit = takeSemanticScholarRateLimit(principal?.userId);
+      if (!rateLimit.allowed) {
+        return json(
+          429,
+          {
+            error: {
+              code: "rate_limit_exceeded",
+              message: "Too many Semantic Scholar requests; please retry shortly",
+              details: {
+                retry_after_seconds: rateLimit.retryAfterSeconds,
+              },
+            },
+            meta: {
+              request_id: context.requestId,
+            },
+          },
+          {
+            "retry-after": String(rateLimit.retryAfterSeconds),
+          },
+        );
+      }
+
+      const { semanticScholarApiKey } = getConfig();
+      const timeout = AbortSignal.timeout(8000);
+      return getCachedSemanticScholarResponse(cacheKey, () =>
+        fetchSemanticScholarPaperLookup({
+          apiKey: semanticScholarApiKey,
+          queryType,
+          queryValue,
+          signal: timeout,
+        })
+      );
+    })();
+
+  if (paperId?.statusCode) {
+    return paperId;
+  }
+
+  return json(200, {
+    data: {
+      paper_id: paperId,
+    },
+    meta: {
+      request_id: context.requestId,
+      query_type: queryType,
+    },
+  });
+}
+async function handleSemanticScholarDoiMetadataRoute(context, event, principal) {
+  const parsedBody = parseJsonBody(event);
+  if (!parsedBody.ok) {
+    return errorResponse(400, "invalid_json", "Request body must be valid JSON", context.requestId);
+  }
+
+  const normalizedRequest = normalizeSemanticScholarDoiRequest(parsedBody.value || {});
+  if (normalizedRequest.error) {
+    return errorResponse(400, normalizedRequest.error, normalizedRequest.message, context.requestId);
+  }
+
+  const { doi } = normalizedRequest.value;
+  const cacheKey = `doi-metadata:${doi}`;
+  const cached = getCachedSemanticScholarValue(cacheKey);
+  const metadata = cached.hit
+    ? await cached.value
+    : await (async () => {
+      const rateLimit = takeSemanticScholarRateLimit(principal?.userId);
+      if (!rateLimit.allowed) {
+        return json(
+          429,
+          {
+            error: {
+              code: "rate_limit_exceeded",
+              message: "Too many Semantic Scholar requests; please retry shortly",
+              details: {
+                retry_after_seconds: rateLimit.retryAfterSeconds,
+              },
+            },
+            meta: {
+              request_id: context.requestId,
+            },
+          },
+          {
+            "retry-after": String(rateLimit.retryAfterSeconds),
+          },
+        );
+      }
+
+      const { semanticScholarApiKey } = getConfig();
+      const timeout = AbortSignal.timeout(8000);
+      return getCachedSemanticScholarResponse(cacheKey, () =>
+        fetchSemanticScholarDoiMetadata({
+          apiKey: semanticScholarApiKey,
+          doi,
+          signal: timeout,
+        })
+      );
+    })();
+
+  if (metadata?.statusCode) {
+    return metadata;
+  }
+
+  return json(200, {
+    data: metadata,
+    meta: {
+      request_id: context.requestId,
+      doi,
+    },
+  });
+}
+
 
 
 function pickPublicationFields(input) {
@@ -947,9 +1275,28 @@ export async function handler(event) {
     }
 
     const route = getRouteSegments(event.path || "/");
-    const isManagementRoute = route[0] === "keys";
+    const isManagementRoute =
+      route[0] === "keys" || route[0] === "recommendations" || route[0] === "references" || route[0] === "citations" || route[0] === "lookup" || route[0] === "doi-metadata";
 
     if (isManagementRoute) {
+      const authorization = event.headers?.authorization || event.headers?.Authorization || null;
+      const presentedApiKey = event.headers?.["x-api-key"] || event.headers?.["X-API-Key"] || null;
+      const bearerToken = typeof authorization === "string" && authorization.startsWith("Bearer ")
+        ? authorization.slice("Bearer ".length).trim()
+        : null;
+      if (isRefHubApiKeyValue(bearerToken) || isRefHubApiKeyValue(presentedApiKey)) {
+        return withCors(
+          errorResponse(
+            401,
+            "refhub_api_key_not_supported",
+            getManagementAuthFailureMessage("refhub_api_key_not_supported"),
+            context.requestId,
+            { auth_scheme: "Bearer" },
+          ),
+          corsHeaders,
+        );
+      }
+
       const authResult = await authenticateManagementUser(event);
       if (authResult.error) {
         return withCors(
@@ -963,13 +1310,23 @@ export async function handler(event) {
       supabase = authResult.supabase;
       principal = authResult.principal;
 
-      if (route.length === 1 && event.httpMethod === "GET") {
+      if (route.length === 1 && route[0] === "keys" && event.httpMethod === "GET") {
         response = await handleListApiKeys(supabase, principal, context);
-      } else if (route.length === 1 && event.httpMethod === "POST") {
+      } else if (route.length === 1 && route[0] === "keys" && event.httpMethod === "POST") {
         response = await handleCreateApiKey(supabase, principal, context, event);
-      } else if (route.length === 2 && event.httpMethod === "DELETE") {
+      } else if (route.length === 1 && route[0] === "recommendations" && event.httpMethod === "POST") {
+        response = await handlePaperRecommendations(context, event, principal);
+      } else if (route.length === 1 && route[0] === "references" && event.httpMethod === "POST") {
+        response = await handlePaperReferences(context, event, principal);
+      } else if (route.length === 1 && route[0] === "citations" && event.httpMethod === "POST") {
+        response = await handlePaperCitations(context, event, principal);
+      } else if (route.length === 1 && route[0] === "lookup" && event.httpMethod === "POST") {
+        response = await handlePaperLookup(context, event, principal);
+      } else if (route.length === 1 && route[0] === "doi-metadata" && event.httpMethod === "POST") {
+        response = await handleSemanticScholarDoiMetadataRoute(context, event, principal);
+      } else if (route.length === 2 && route[0] === "keys" && event.httpMethod === "DELETE") {
         response = await handleRevokeApiKey(supabase, principal, context, route[1]);
-      } else if (route.length === 3 && route[2] === "revoke" && event.httpMethod === "POST") {
+      } else if (route.length === 3 && route[0] === "keys" && route[2] === "revoke" && event.httpMethod === "POST") {
         response = await handleRevokeApiKey(supabase, principal, context, route[1]);
       } else {
         response = errorResponse(404, "route_not_found", "Route not found", context.requestId);

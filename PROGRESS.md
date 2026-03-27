@@ -19,6 +19,11 @@
 - 2026-03-24 09:07 CET: API key management implementation started on `/api/v1/keys` with separate Supabase JWT auth path
 - 2026-03-24 09:16 CET: management route handlers added for list/create/revoke; server-side key issuance and ownership checks wired
 - 2026-03-24 09:21 CET: local verification passed for syntax and diff hygiene; runtime smoke import blocked locally because `@supabase/supabase-js` is not installed in this checkout
+- 2026-03-27 08:30 CET: Semantic Scholar recommendations backend route added on `POST /api/v1/recommendations` with Supabase session JWT auth only and explicit RefHub API-key rejection
+- 2026-03-27 08:30 CET: server-side Semantic Scholar proxy helper added with lean paper normalization and optional `SEMANTIC_SCHOLAR_API_KEY` support
+- 2026-03-27 08:45 CET: Semantic Scholar references/citations backend routes added on `POST /api/v1/references` and `POST /api/v1/citations` with the same Supabase JWT-only auth mode and lean normalized response shape
+- 2026-03-27 08:45 CET: shared Semantic Scholar paper-list request validation/normalization expanded so recommendations, references, and citations stay aligned for frontend use
+- 2026-03-27 09:00 CET: Semantic Scholar backend hardening applied on the existing PR branch with sanitized upstream errors, consistent shared route handling, short in-memory response caching, and lightweight per-user throttling for the JWT-only routes
 
 ## Still pending
 
@@ -27,6 +32,9 @@
 - stricter schema validation and rate limiting
 - automated tests once the backend repo/package is wired into CI
 - deployment hookup in the actual standalone backend repo if it exists outside this checkout
+- live recommendation smoke testing against Semantic Scholar once this environment has outbound network access and runtime env vars available
+- live references/citations smoke testing against Semantic Scholar once this environment has outbound network access and runtime env vars available
+- load testing or distributed rate limiting if these routes need stronger protection beyond a single warm function instance
 
 ## Local repo note
 

@@ -21,6 +21,11 @@ import {
   text,
   withCors,
 } from "../src/http.js";
+import {
+  fetchSemanticScholarRecommendations,
+  isRefHubApiKeyValue,
+  normalizeRecommendationRequest,
+} from "../src/semantic-scholar.js";
 
 const PUBLICATION_FIELDS = [
   "title",
@@ -75,6 +80,18 @@ function toSafeErrorResponse(error, requestId) {
     return errorResponse(400, "invalid_tag_ids", error.message, requestId);
   }
 
+  if (
+    [
+      "paper_not_found",
+      "semantic_scholar_rate_limited",
+      "semantic_scholar_error",
+      "semantic_scholar_timeout",
+      "semantic_scholar_unreachable",
+    ].includes(error?.code)
+  ) {
+    return errorResponse(error.status || 502, error.code, error.message, requestId, error.details);
+  }
+
   return errorResponse(500, "internal_error", "Unexpected server error", requestId);
 }
 
@@ -98,6 +115,10 @@ function getAuthFailureMessage(code) {
 function getManagementAuthFailureMessage(code) {
   if (code === "missing_bearer_token") {
     return "Bearer token is required";
+  }
+
+  if (code === "refhub_api_key_not_supported") {
+    return "RefHub API keys are not supported for this route";
   }
 
   if (code === "invalid_bearer_token") {
@@ -380,6 +401,37 @@ async function handleRevokeApiKey(supabase, principal, context, keyId) {
     data: serializeApiKeyRecord(revokedKey),
     meta: {
       request_id: context.requestId,
+    },
+  });
+}
+
+async function handlePaperRecommendations(context, event) {
+  const parsedBody = parseJsonBody(event);
+  if (!parsedBody.ok) {
+    return errorResponse(400, "invalid_json", "Request body must be valid JSON", context.requestId);
+  }
+
+  const normalizedRequest = normalizeRecommendationRequest(parsedBody.value || {});
+  if (normalizedRequest.error) {
+    return errorResponse(400, normalizedRequest.error, normalizedRequest.message, context.requestId);
+  }
+
+  const { seedPaperId, limit } = normalizedRequest.value;
+  const { semanticScholarApiKey } = getConfig();
+  const timeout = AbortSignal.timeout(8000);
+  const recommendations = await fetchSemanticScholarRecommendations({
+    apiKey: semanticScholarApiKey,
+    seedPaperId,
+    limit,
+    signal: timeout,
+  });
+
+  return json(200, {
+    data: recommendations,
+    meta: {
+      request_id: context.requestId,
+      paper_id: seedPaperId,
+      limit,
     },
   });
 }
@@ -947,9 +999,27 @@ export async function handler(event) {
     }
 
     const route = getRouteSegments(event.path || "/");
-    const isManagementRoute = route[0] === "keys";
+    const isManagementRoute = route[0] === "keys" || route[0] === "recommendations";
 
     if (isManagementRoute) {
+      const authorization = event.headers?.authorization || event.headers?.Authorization || null;
+      const presentedApiKey = event.headers?.["x-api-key"] || event.headers?.["X-API-Key"] || null;
+      const bearerToken = typeof authorization === "string" && authorization.startsWith("Bearer ")
+        ? authorization.slice("Bearer ".length).trim()
+        : null;
+      if (isRefHubApiKeyValue(bearerToken) || isRefHubApiKeyValue(presentedApiKey)) {
+        return withCors(
+          errorResponse(
+            401,
+            "refhub_api_key_not_supported",
+            getManagementAuthFailureMessage("refhub_api_key_not_supported"),
+            context.requestId,
+            { auth_scheme: "Bearer" },
+          ),
+          corsHeaders,
+        );
+      }
+
       const authResult = await authenticateManagementUser(event);
       if (authResult.error) {
         return withCors(
@@ -963,13 +1033,15 @@ export async function handler(event) {
       supabase = authResult.supabase;
       principal = authResult.principal;
 
-      if (route.length === 1 && event.httpMethod === "GET") {
+      if (route.length === 1 && route[0] === "keys" && event.httpMethod === "GET") {
         response = await handleListApiKeys(supabase, principal, context);
-      } else if (route.length === 1 && event.httpMethod === "POST") {
+      } else if (route.length === 1 && route[0] === "keys" && event.httpMethod === "POST") {
         response = await handleCreateApiKey(supabase, principal, context, event);
-      } else if (route.length === 2 && event.httpMethod === "DELETE") {
+      } else if (route.length === 1 && route[0] === "recommendations" && event.httpMethod === "POST") {
+        response = await handlePaperRecommendations(context, event);
+      } else if (route.length === 2 && route[0] === "keys" && event.httpMethod === "DELETE") {
         response = await handleRevokeApiKey(supabase, principal, context, route[1]);
-      } else if (route.length === 3 && route[2] === "revoke" && event.httpMethod === "POST") {
+      } else if (route.length === 3 && route[0] === "keys" && route[2] === "revoke" && event.httpMethod === "POST") {
         response = await handleRevokeApiKey(supabase, principal, context, route[1]);
       } else {
         response = errorResponse(404, "route_not_found", "Route not found", context.requestId);

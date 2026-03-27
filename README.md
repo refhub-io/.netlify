@@ -12,6 +12,7 @@ Management routes authenticated with a Supabase session JWT:
 - `POST /api/v1/keys`
 - `POST /api/v1/keys/:keyId/revoke`
 - `DELETE /api/v1/keys/:keyId`
+- `POST /api/v1/recommendations`
 
 Data routes authenticated with `rhk_...` API keys:
 
@@ -61,6 +62,7 @@ The handler dispatches by path segment so the backend can stay small while the c
 - `SUPABASE_URL`
 - `SUPABASE_SERVICE_ROLE_KEY`
 - `REFHUB_API_KEY_PEPPER`
+- `SEMANTIC_SCHOLAR_API_KEY` optional, recommended for stable upstream rate limits
 - `REFHUB_API_MAX_BULK_ITEMS` optional, defaults to `50`
 - `REFHUB_API_MAX_BODY_BYTES` optional, defaults to `262144`
 - `REFHUB_API_AUDIT_DISABLED` optional, defaults to `false`
@@ -181,6 +183,60 @@ Revokes a key owned by the authenticated user and returns the updated record.
 Authentication: Supabase session JWT
 
 Alias for revoke to match clients that prefer `DELETE`. The record is soft-revoked by setting `revoked_at`; it is not deleted from storage.
+
+### `POST /api/v1/recommendations`
+
+Authentication: Supabase session JWT only
+
+This route proxies Semantic Scholar paper recommendations server-side. RefHub API keys are explicitly rejected for this route so the frontend can use the normal logged-in session without exposing a Semantic Scholar key.
+
+Request body:
+
+```json
+{
+  "paper_id": "DOI:10.1101/2020.02.20.958025",
+  "limit": 10
+}
+```
+
+Rules:
+
+- `paper_id` is required and should be a Semantic Scholar-compatible paper identifier such as a `paperId` or `DOI:<doi>`
+- `limit` is optional and must be an integer from `1` to `25`
+- the backend forwards the request to Semantic Scholar from the server and returns a lean normalized list for dialog use
+
+Response shape:
+
+```json
+{
+  "data": [
+    {
+      "paper_id": "52cdb6ed946dfed25113bd194d5e2bb843c66331",
+      "external_ids": {
+        "DOI": "10.1101/2020.11.04.367797"
+      },
+      "title": "Example paper",
+      "abstract": "...",
+      "year": 2020,
+      "venue": "bioRxiv",
+      "url": "https://www.semanticscholar.org/paper/...",
+      "citation_count": 42,
+      "open_access_pdf_url": "https://...",
+      "authors": [
+        {
+          "author_id": "12345",
+          "name": "Example Author"
+        }
+      ]
+    }
+  ],
+  "meta": {
+    "request_id": "uuid",
+    "paper_id": "DOI:10.1101/2020.02.20.958025",
+    "limit": 10
+  }
+}
+```
 
 ### `GET /api/v1/vaults`
 

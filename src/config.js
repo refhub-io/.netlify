@@ -16,6 +16,7 @@ export function getConfig() {
     supabaseUrl: readRequired("SUPABASE_URL"),
     supabaseServiceRoleKey: readRequired("SUPABASE_SERVICE_ROLE_KEY"),
     apiKeyPepper: readRequired("REFHUB_API_KEY_PEPPER"),
+    semanticScholarApiKey: process.env.SEMANTIC_SCHOLAR_API_KEY || null,
     maxBulkItems: (() => {
       const n = Number(process.env.REFHUB_API_MAX_BULK_ITEMS || DEFAULT_MAX_BULK_ITEMS);
       if (!Number.isInteger(n) || n < 1) {

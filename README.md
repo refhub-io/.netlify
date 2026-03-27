@@ -13,6 +13,8 @@ Management routes authenticated with a Supabase session JWT:
 - `POST /api/v1/keys/:keyId/revoke`
 - `DELETE /api/v1/keys/:keyId`
 - `POST /api/v1/recommendations`
+- `POST /api/v1/references`
+- `POST /api/v1/citations`
 
 Data routes authenticated with `rhk_...` API keys:
 
@@ -237,6 +239,68 @@ Response shape:
   }
 }
 ```
+
+### `POST /api/v1/references`
+
+Authentication: Supabase session JWT only
+
+This route proxies Semantic Scholar paper references server-side. It returns the papers cited by the seed paper and rejects RefHub API keys.
+
+Request body:
+
+```json
+{
+  "paper_id": "DOI:10.1101/2020.02.20.958025",
+  "limit": 10
+}
+```
+
+Rules:
+
+- `paper_id` is required and should be a Semantic Scholar-compatible paper identifier such as a `paperId` or `DOI:<doi>`
+- `limit` is optional and must be an integer from `1` to `25`
+- the backend forwards the request to Semantic Scholar from the server and returns the same lean normalized paper shape as recommendations
+
+Response shape:
+
+```json
+{
+  "data": [
+    {
+      "paper_id": "52cdb6ed946dfed25113bd194d5e2bb843c66331",
+      "external_ids": {
+        "DOI": "10.1101/2020.11.04.367797"
+      },
+      "title": "Example paper",
+      "abstract": "...",
+      "year": 2020,
+      "venue": "bioRxiv",
+      "url": "https://www.semanticscholar.org/paper/...",
+      "citation_count": 42,
+      "open_access_pdf_url": "https://...",
+      "authors": [
+        {
+          "author_id": "12345",
+          "name": "Example Author"
+        }
+      ]
+    }
+  ],
+  "meta": {
+    "request_id": "uuid",
+    "paper_id": "DOI:10.1101/2020.02.20.958025",
+    "limit": 10
+  }
+}
+```
+
+### `POST /api/v1/citations`
+
+Authentication: Supabase session JWT only
+
+This route proxies Semantic Scholar paper citations server-side. It returns the papers citing the seed paper and rejects RefHub API keys.
+
+Request body and response shape match `POST /api/v1/references`.
 
 ### `GET /api/v1/vaults`
 

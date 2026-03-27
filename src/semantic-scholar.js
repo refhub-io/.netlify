@@ -1,6 +1,6 @@
-const DEFAULT_RECOMMENDATION_LIMIT = 10;
-const MAX_RECOMMENDATION_LIMIT = 25;
-const SEMANTIC_SCHOLAR_RECOMMENDATION_FIELDS = [
+const DEFAULT_PAPER_LIST_LIMIT = 10;
+const MAX_PAPER_LIST_LIMIT = 25;
+const SEMANTIC_SCHOLAR_PAPER_FIELDS = [
   "paperId",
   "externalIds",
   "url",
@@ -32,7 +32,7 @@ function normalizeAuthor(author) {
   };
 }
 
-function normalizeRecommendedPaper(paper) {
+function normalizePaper(paper) {
   return {
     paper_id: paper.paperId || null,
     external_ids: paper.externalIds || {},
@@ -51,7 +51,7 @@ export function isRefHubApiKeyValue(value) {
   return typeof value === "string" && /^rhk_[^_]+_[^_]+$/.test(value.trim());
 }
 
-export function normalizeRecommendationRequest(body) {
+export function normalizePaperListRequest(body) {
   const seedPaperId = typeof body?.paper_id === "string" ? body.paper_id.trim() : "";
   if (!seedPaperId) {
     return {
@@ -65,7 +65,7 @@ export function normalizeRecommendationRequest(body) {
     return {
       value: {
         seedPaperId,
-        limit: DEFAULT_RECOMMENDATION_LIMIT,
+        limit: DEFAULT_PAPER_LIST_LIMIT,
       },
     };
   }
@@ -73,14 +73,14 @@ export function normalizeRecommendationRequest(body) {
   if (!Number.isInteger(rawLimit)) {
     return {
       error: "invalid_limit",
-      message: `limit must be an integer between 1 and ${MAX_RECOMMENDATION_LIMIT}`,
+      message: `limit must be an integer between 1 and ${MAX_PAPER_LIST_LIMIT}`,
     };
   }
 
-  if (rawLimit < 1 || rawLimit > MAX_RECOMMENDATION_LIMIT) {
+  if (rawLimit < 1 || rawLimit > MAX_PAPER_LIST_LIMIT) {
     return {
       error: "invalid_limit",
-      message: `limit must be an integer between 1 and ${MAX_RECOMMENDATION_LIMIT}`,
+      message: `limit must be an integer between 1 and ${MAX_PAPER_LIST_LIMIT}`,
     };
   }
 
@@ -92,10 +92,91 @@ export function normalizeRecommendationRequest(body) {
   };
 }
 
+async function fetchSemanticScholarPaperList({
+  apiKey,
+  seedPaperId,
+  limit,
+  signal,
+  url,
+  responseItemsPath,
+  paperKey,
+}) {
+  url.searchParams.set("fields", SEMANTIC_SCHOLAR_PAPER_FIELDS.join(","));
+  url.searchParams.set("limit", String(limit));
+
+  const headers = {
+    accept: "application/json",
+  };
+
+  if (apiKey) {
+    headers["x-api-key"] = apiKey;
+  }
+
+  let response;
+  try {
+    response = await fetch(url, {
+      method: "GET",
+      headers,
+      signal,
+    });
+  } catch (error) {
+    if (error?.name === "TimeoutError" || error?.name === "AbortError") {
+      throw createSemanticScholarError(
+        "semantic_scholar_timeout",
+        "Semantic Scholar request timed out",
+        504,
+      );
+    }
+
+    throw createSemanticScholarError(
+      "semantic_scholar_unreachable",
+      "Semantic Scholar request could not be completed",
+      502,
+    );
+  }
+
+  if (response.status === 404) {
+    throw createSemanticScholarError(
+      "paper_not_found",
+      "Semantic Scholar seed paper was not found",
+      404,
+      { paper_id: seedPaperId },
+    );
+  }
+
+  if (response.status === 429) {
+    throw createSemanticScholarError(
+      "semantic_scholar_rate_limited",
+      "Semantic Scholar rate limit exceeded",
+      503,
+    );
+  }
+
+  if (!response.ok) {
+    const responseText = await response.text().catch(() => "");
+    throw createSemanticScholarError(
+      "semantic_scholar_error",
+      "Semantic Scholar request failed",
+      502,
+      {
+        upstream_status: response.status,
+        upstream_body: responseText.slice(0, 200),
+      },
+    );
+  }
+
+  const payload = await response.json();
+  const responseItems = responseItemsPath.reduce((value, key) => value?.[key], payload);
+  const items = Array.isArray(responseItems) ? responseItems : [];
+
+  return items
+    .map((item) => item?.[paperKey])
+    .filter((paper) => paper && typeof paper === "object")
+    .map(normalizePaper);
+}
+
 export async function fetchSemanticScholarRecommendations({ apiKey, seedPaperId, limit, signal }) {
   const url = new URL("https://api.semanticscholar.org/recommendations/v1/papers");
-  url.searchParams.set("fields", SEMANTIC_SCHOLAR_RECOMMENDATION_FIELDS.join(","));
-  url.searchParams.set("limit", String(limit));
 
   const headers = {
     "content-type": "application/json",
@@ -166,5 +247,35 @@ export async function fetchSemanticScholarRecommendations({ apiKey, seedPaperId,
   const payload = await response.json();
   const recommendedPapers = Array.isArray(payload?.recommendedPapers) ? payload.recommendedPapers : [];
 
-  return recommendedPapers.map(normalizeRecommendedPaper);
+  return recommendedPapers.map(normalizePaper);
+}
+
+export async function fetchSemanticScholarReferences({ apiKey, seedPaperId, limit, signal }) {
+  const encodedPaperId = encodeURIComponent(seedPaperId);
+  const url = new URL(`https://api.semanticscholar.org/graph/v1/paper/${encodedPaperId}/references`);
+
+  return fetchSemanticScholarPaperList({
+    apiKey,
+    seedPaperId,
+    limit,
+    signal,
+    url,
+    responseItemsPath: ["data"],
+    paperKey: "citedPaper",
+  });
+}
+
+export async function fetchSemanticScholarCitations({ apiKey, seedPaperId, limit, signal }) {
+  const encodedPaperId = encodeURIComponent(seedPaperId);
+  const url = new URL(`https://api.semanticscholar.org/graph/v1/paper/${encodedPaperId}/citations`);
+
+  return fetchSemanticScholarPaperList({
+    apiKey,
+    seedPaperId,
+    limit,
+    signal,
+    url,
+    responseItemsPath: ["data"],
+    paperKey: "citingPaper",
+  });
 }

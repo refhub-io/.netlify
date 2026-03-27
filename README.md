@@ -206,6 +206,9 @@ Rules:
 - `paper_id` is required and should be a Semantic Scholar-compatible paper identifier such as a `paperId` or `DOI:<doi>`
 - `limit` is optional and must be an integer from `1` to `25`
 - the backend forwards the request to Semantic Scholar from the server and returns a lean normalized list for dialog use
+- successful responses are cached briefly in-process to reduce duplicate upstream calls for repeated dialog requests
+- these JWT-authenticated Semantic Scholar routes apply a lightweight per-user rate limit and may return `429 rate_limit_exceeded` when hit too aggressively
+- upstream Semantic Scholar failures are returned as sanitized backend errors without exposing upstream response bodies
 
 Response shape:
 
@@ -260,6 +263,8 @@ Rules:
 - `paper_id` is required and should be a Semantic Scholar-compatible paper identifier such as a `paperId` or `DOI:<doi>`
 - `limit` is optional and must be an integer from `1` to `25`
 - the backend forwards the request to Semantic Scholar from the server and returns the same lean normalized paper shape as recommendations
+- successful responses are cached briefly in-process and the same lightweight per-user rate limit applies as on recommendations
+- upstream Semantic Scholar failures are returned as sanitized backend errors without exposing upstream response bodies
 
 Response shape:
 

@@ -47,6 +47,10 @@ function normalizePaper(paper) {
   };
 }
 
+function limitNormalizedPapers(papers, limit) {
+  return papers.slice(0, limit);
+}
+
 export function isRefHubApiKeyValue(value) {
   return typeof value === "string" && /^rhk_[^_]+_[^_]+$/.test(value.trim());
 }
@@ -153,15 +157,11 @@ async function fetchSemanticScholarPaperList({
   }
 
   if (!response.ok) {
-    const responseText = await response.text().catch(() => "");
     throw createSemanticScholarError(
       "semantic_scholar_error",
       "Semantic Scholar request failed",
       502,
-      {
-        upstream_status: response.status,
-        upstream_body: responseText.slice(0, 200),
-      },
+      { upstream_status: response.status },
     );
   }
 
@@ -169,10 +169,13 @@ async function fetchSemanticScholarPaperList({
   const responseItems = responseItemsPath.reduce((value, key) => value?.[key], payload);
   const items = Array.isArray(responseItems) ? responseItems : [];
 
-  return items
+  return limitNormalizedPapers(
+    items
     .map((item) => item?.[paperKey])
     .filter((paper) => paper && typeof paper === "object")
-    .map(normalizePaper);
+    .map(normalizePaper),
+    limit,
+  );
 }
 
 export async function fetchSemanticScholarRecommendations({ apiKey, seedPaperId, limit, signal }) {
@@ -232,22 +235,18 @@ export async function fetchSemanticScholarRecommendations({ apiKey, seedPaperId,
   }
 
   if (!response.ok) {
-    const responseText = await response.text().catch(() => "");
     throw createSemanticScholarError(
       "semantic_scholar_error",
       "Semantic Scholar request failed",
       502,
-      {
-        upstream_status: response.status,
-        upstream_body: responseText.slice(0, 200),
-      },
+      { upstream_status: response.status },
     );
   }
 
   const payload = await response.json();
   const recommendedPapers = Array.isArray(payload?.recommendedPapers) ? payload.recommendedPapers : [];
 
-  return recommendedPapers.map(normalizePaper);
+  return limitNormalizedPapers(recommendedPapers.map(normalizePaper), limit);
 }
 
 export async function fetchSemanticScholarReferences({ apiKey, seedPaperId, limit, signal }) {

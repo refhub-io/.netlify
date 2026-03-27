@@ -76,25 +76,179 @@ const VAULT_PUBLICATION_SELECT = [
   "updated_at",
   ...PUBLICATION_FIELDS,
 ].join(", ");
+const SEMANTIC_SCHOLAR_CACHE_TTL_MS = 60 * 1000;
+const SEMANTIC_SCHOLAR_RATE_LIMIT_WINDOW_MS = 60 * 1000;
+const SEMANTIC_SCHOLAR_RATE_LIMIT_MAX_REQUESTS = 12;
+const semanticScholarResponseCache = new Map();
+const semanticScholarRateLimitBuckets = new Map();
 
 function toSafeErrorResponse(error, requestId) {
   if (error?.code === "invalid_tag_ids") {
     return errorResponse(400, "invalid_tag_ids", error.message, requestId);
   }
 
-  if (
-    [
-      "paper_not_found",
-      "semantic_scholar_rate_limited",
-      "semantic_scholar_error",
-      "semantic_scholar_timeout",
-      "semantic_scholar_unreachable",
-    ].includes(error?.code)
-  ) {
-    return errorResponse(error.status || 502, error.code, error.message, requestId, error.details);
+  if (error?.code === "paper_not_found") {
+    return errorResponse(error.status || 404, error.code, error.message, requestId, error.details);
+  }
+
+  if (["semantic_scholar_rate_limited", "semantic_scholar_error", "semantic_scholar_timeout", "semantic_scholar_unreachable"]
+    .includes(error?.code)) {
+    return errorResponse(error.status || 502, error.code, error.message, requestId);
   }
 
   return errorResponse(500, "internal_error", "Unexpected server error", requestId);
+}
+
+function pruneSemanticScholarState(now = Date.now()) {
+  for (const [key, entry] of semanticScholarResponseCache.entries()) {
+    if (!entry.promise && entry.expiresAt <= now) {
+      semanticScholarResponseCache.delete(key);
+    }
+  }
+
+  for (const [key, bucket] of semanticScholarRateLimitBuckets.entries()) {
+    if (bucket.resetAt <= now) {
+      semanticScholarRateLimitBuckets.delete(key);
+    }
+  }
+}
+
+function takeSemanticScholarRateLimit(userId, now = Date.now()) {
+  pruneSemanticScholarState(now);
+
+  const bucketKey = userId || "anonymous";
+  const existing = semanticScholarRateLimitBuckets.get(bucketKey);
+  if (!existing || existing.resetAt <= now) {
+    semanticScholarRateLimitBuckets.set(bucketKey, {
+      count: 1,
+      resetAt: now + SEMANTIC_SCHOLAR_RATE_LIMIT_WINDOW_MS,
+    });
+    return { allowed: true };
+  }
+
+  if (existing.count >= SEMANTIC_SCHOLAR_RATE_LIMIT_MAX_REQUESTS) {
+    return {
+      allowed: false,
+      retryAfterSeconds: Math.max(1, Math.ceil((existing.resetAt - now) / 1000)),
+    };
+  }
+
+  existing.count += 1;
+  return { allowed: true };
+}
+
+function getCachedSemanticScholarValue(cacheKey, now = Date.now()) {
+  pruneSemanticScholarState(now);
+
+  const existing = semanticScholarResponseCache.get(cacheKey);
+  if (existing?.value && existing.expiresAt > now) {
+    return { hit: true, value: existing.value };
+  }
+
+  if (existing?.promise) {
+    return { hit: true, value: existing.promise };
+  }
+
+  return { hit: false, value: null };
+}
+
+async function getCachedSemanticScholarResponse(cacheKey, fetcher, now = Date.now()) {
+  pruneSemanticScholarState(now);
+
+  const existing = semanticScholarResponseCache.get(cacheKey);
+  if (existing?.value && existing.expiresAt > now) {
+    return existing.value;
+  }
+
+  if (existing?.promise) {
+    return existing.promise;
+  }
+
+  const promise = (async () => {
+    try {
+      const value = await fetcher();
+      semanticScholarResponseCache.set(cacheKey, {
+        value,
+        expiresAt: Date.now() + SEMANTIC_SCHOLAR_CACHE_TTL_MS,
+      });
+      return value;
+    } catch (error) {
+      semanticScholarResponseCache.delete(cacheKey);
+      throw error;
+    }
+  })();
+
+  semanticScholarResponseCache.set(cacheKey, {
+    promise,
+    expiresAt: now + SEMANTIC_SCHOLAR_CACHE_TTL_MS,
+  });
+
+  return promise;
+}
+
+async function handleSemanticScholarPaperRoute(context, event, principal, routeName, fetcher) {
+  const parsedBody = parseJsonBody(event);
+  if (!parsedBody.ok) {
+    return errorResponse(400, "invalid_json", "Request body must be valid JSON", context.requestId);
+  }
+
+  const normalizedRequest = normalizePaperListRequest(parsedBody.value || {});
+  if (normalizedRequest.error) {
+    return errorResponse(400, normalizedRequest.error, normalizedRequest.message, context.requestId);
+  }
+
+  const { seedPaperId, limit } = normalizedRequest.value;
+  const cacheKey = `${routeName}:${seedPaperId}:${limit}`;
+  const cached = getCachedSemanticScholarValue(cacheKey);
+  const papers = cached.hit
+    ? await cached.value
+    : await (async () => {
+      const rateLimit = takeSemanticScholarRateLimit(principal?.userId);
+      if (!rateLimit.allowed) {
+        return json(
+          429,
+          {
+            error: {
+              code: "rate_limit_exceeded",
+              message: "Too many Semantic Scholar requests; please retry shortly",
+              details: {
+                retry_after_seconds: rateLimit.retryAfterSeconds,
+              },
+            },
+            meta: {
+              request_id: context.requestId,
+            },
+          },
+          {
+            "retry-after": String(rateLimit.retryAfterSeconds),
+          },
+        );
+      }
+
+      const { semanticScholarApiKey } = getConfig();
+      const timeout = AbortSignal.timeout(8000);
+      return getCachedSemanticScholarResponse(cacheKey, () =>
+        fetcher({
+          apiKey: semanticScholarApiKey,
+          seedPaperId,
+          limit,
+          signal: timeout,
+        })
+      );
+    })();
+
+  if (papers?.statusCode) {
+    return papers;
+  }
+
+  return json(200, {
+    data: papers,
+    meta: {
+      request_id: context.requestId,
+      paper_id: seedPaperId,
+      limit,
+    },
+  });
 }
 
 function getAuthFailureMessage(code) {
@@ -407,97 +561,22 @@ async function handleRevokeApiKey(supabase, principal, context, keyId) {
   });
 }
 
-async function handlePaperRecommendations(context, event) {
-  const parsedBody = parseJsonBody(event);
-  if (!parsedBody.ok) {
-    return errorResponse(400, "invalid_json", "Request body must be valid JSON", context.requestId);
-  }
-
-  const normalizedRequest = normalizePaperListRequest(parsedBody.value || {});
-  if (normalizedRequest.error) {
-    return errorResponse(400, normalizedRequest.error, normalizedRequest.message, context.requestId);
-  }
-
-  const { seedPaperId, limit } = normalizedRequest.value;
-  const { semanticScholarApiKey } = getConfig();
-  const timeout = AbortSignal.timeout(8000);
-  const recommendations = await fetchSemanticScholarRecommendations({
-    apiKey: semanticScholarApiKey,
-    seedPaperId,
-    limit,
-    signal: timeout,
-  });
-
-  return json(200, {
-    data: recommendations,
-    meta: {
-      request_id: context.requestId,
-      paper_id: seedPaperId,
-      limit,
-    },
-  });
+async function handlePaperRecommendations(context, event, principal) {
+  return handleSemanticScholarPaperRoute(
+    context,
+    event,
+    principal,
+    "recommendations",
+    fetchSemanticScholarRecommendations,
+  );
 }
 
-async function handlePaperReferences(context, event) {
-  const parsedBody = parseJsonBody(event);
-  if (!parsedBody.ok) {
-    return errorResponse(400, "invalid_json", "Request body must be valid JSON", context.requestId);
-  }
-
-  const normalizedRequest = normalizePaperListRequest(parsedBody.value || {});
-  if (normalizedRequest.error) {
-    return errorResponse(400, normalizedRequest.error, normalizedRequest.message, context.requestId);
-  }
-
-  const { seedPaperId, limit } = normalizedRequest.value;
-  const { semanticScholarApiKey } = getConfig();
-  const timeout = AbortSignal.timeout(8000);
-  const references = await fetchSemanticScholarReferences({
-    apiKey: semanticScholarApiKey,
-    seedPaperId,
-    limit,
-    signal: timeout,
-  });
-
-  return json(200, {
-    data: references,
-    meta: {
-      request_id: context.requestId,
-      paper_id: seedPaperId,
-      limit,
-    },
-  });
+async function handlePaperReferences(context, event, principal) {
+  return handleSemanticScholarPaperRoute(context, event, principal, "references", fetchSemanticScholarReferences);
 }
 
-async function handlePaperCitations(context, event) {
-  const parsedBody = parseJsonBody(event);
-  if (!parsedBody.ok) {
-    return errorResponse(400, "invalid_json", "Request body must be valid JSON", context.requestId);
-  }
-
-  const normalizedRequest = normalizePaperListRequest(parsedBody.value || {});
-  if (normalizedRequest.error) {
-    return errorResponse(400, normalizedRequest.error, normalizedRequest.message, context.requestId);
-  }
-
-  const { seedPaperId, limit } = normalizedRequest.value;
-  const { semanticScholarApiKey } = getConfig();
-  const timeout = AbortSignal.timeout(8000);
-  const citations = await fetchSemanticScholarCitations({
-    apiKey: semanticScholarApiKey,
-    seedPaperId,
-    limit,
-    signal: timeout,
-  });
-
-  return json(200, {
-    data: citations,
-    meta: {
-      request_id: context.requestId,
-      paper_id: seedPaperId,
-      limit,
-    },
-  });
+async function handlePaperCitations(context, event, principal) {
+  return handleSemanticScholarPaperRoute(context, event, principal, "citations", fetchSemanticScholarCitations);
 }
 
 
@@ -1103,11 +1182,11 @@ export async function handler(event) {
       } else if (route.length === 1 && route[0] === "keys" && event.httpMethod === "POST") {
         response = await handleCreateApiKey(supabase, principal, context, event);
       } else if (route.length === 1 && route[0] === "recommendations" && event.httpMethod === "POST") {
-        response = await handlePaperRecommendations(context, event);
+        response = await handlePaperRecommendations(context, event, principal);
       } else if (route.length === 1 && route[0] === "references" && event.httpMethod === "POST") {
-        response = await handlePaperReferences(context, event);
+        response = await handlePaperReferences(context, event, principal);
       } else if (route.length === 1 && route[0] === "citations" && event.httpMethod === "POST") {
-        response = await handlePaperCitations(context, event);
+        response = await handlePaperCitations(context, event, principal);
       } else if (route.length === 2 && route[0] === "keys" && event.httpMethod === "DELETE") {
         response = await handleRevokeApiKey(supabase, principal, context, route[1]);
       } else if (route.length === 3 && route[0] === "keys" && route[2] === "revoke" && event.httpMethod === "POST") {

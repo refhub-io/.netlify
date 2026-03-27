@@ -115,6 +115,9 @@ Request rules:
 - `paper_id` is required and must be a non-empty Semantic Scholar-compatible paper identifier
 - `limit` is optional and must be an integer from `1` to `25`
 - the backend calls Semantic Scholar server-side and keeps any configured `SEMANTIC_SCHOLAR_API_KEY` on the server
+- successful responses are cached briefly in-process to reduce duplicate upstream calls
+- the route has a lightweight per-user rate limit and may return `429 rate_limit_exceeded` when bursty clients overrun it
+- upstream Semantic Scholar failures are sanitized before being returned to clients
 
 Example response:
 
@@ -172,6 +175,8 @@ Request rules:
 - `paper_id` is required and must be a non-empty Semantic Scholar-compatible paper identifier
 - `limit` is optional and must be an integer from `1` to `25`
 - the response uses the same lean normalized paper shape as `POST /api/v1/recommendations`
+- successful responses are cached briefly in-process, and the same lightweight per-user rate limit applies
+- upstream Semantic Scholar failures are sanitized before being returned to clients
 
 ### Paper citations
 

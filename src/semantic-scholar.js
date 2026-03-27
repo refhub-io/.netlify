@@ -231,6 +231,7 @@ async function fetchSemanticScholarPaperList({
 
 export async function fetchSemanticScholarRecommendations({ apiKey, seedPaperId, limit, signal }) {
   const url = new URL("https://api.semanticscholar.org/recommendations/v1/papers");
+  url.searchParams.set("fields", SEMANTIC_SCHOLAR_PAPER_FIELDS.join(","));
 
   const headers = {
     "content-type": "application/json",

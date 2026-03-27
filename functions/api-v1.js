@@ -22,9 +22,11 @@ import {
   withCors,
 } from "../src/http.js";
 import {
+  fetchSemanticScholarCitations,
   fetchSemanticScholarRecommendations,
+  fetchSemanticScholarReferences,
   isRefHubApiKeyValue,
-  normalizeRecommendationRequest,
+  normalizePaperListRequest,
 } from "../src/semantic-scholar.js";
 
 const PUBLICATION_FIELDS = [
@@ -411,7 +413,7 @@ async function handlePaperRecommendations(context, event) {
     return errorResponse(400, "invalid_json", "Request body must be valid JSON", context.requestId);
   }
 
-  const normalizedRequest = normalizeRecommendationRequest(parsedBody.value || {});
+  const normalizedRequest = normalizePaperListRequest(parsedBody.value || {});
   if (normalizedRequest.error) {
     return errorResponse(400, normalizedRequest.error, normalizedRequest.message, context.requestId);
   }
@@ -428,6 +430,68 @@ async function handlePaperRecommendations(context, event) {
 
   return json(200, {
     data: recommendations,
+    meta: {
+      request_id: context.requestId,
+      paper_id: seedPaperId,
+      limit,
+    },
+  });
+}
+
+async function handlePaperReferences(context, event) {
+  const parsedBody = parseJsonBody(event);
+  if (!parsedBody.ok) {
+    return errorResponse(400, "invalid_json", "Request body must be valid JSON", context.requestId);
+  }
+
+  const normalizedRequest = normalizePaperListRequest(parsedBody.value || {});
+  if (normalizedRequest.error) {
+    return errorResponse(400, normalizedRequest.error, normalizedRequest.message, context.requestId);
+  }
+
+  const { seedPaperId, limit } = normalizedRequest.value;
+  const { semanticScholarApiKey } = getConfig();
+  const timeout = AbortSignal.timeout(8000);
+  const references = await fetchSemanticScholarReferences({
+    apiKey: semanticScholarApiKey,
+    seedPaperId,
+    limit,
+    signal: timeout,
+  });
+
+  return json(200, {
+    data: references,
+    meta: {
+      request_id: context.requestId,
+      paper_id: seedPaperId,
+      limit,
+    },
+  });
+}
+
+async function handlePaperCitations(context, event) {
+  const parsedBody = parseJsonBody(event);
+  if (!parsedBody.ok) {
+    return errorResponse(400, "invalid_json", "Request body must be valid JSON", context.requestId);
+  }
+
+  const normalizedRequest = normalizePaperListRequest(parsedBody.value || {});
+  if (normalizedRequest.error) {
+    return errorResponse(400, normalizedRequest.error, normalizedRequest.message, context.requestId);
+  }
+
+  const { seedPaperId, limit } = normalizedRequest.value;
+  const { semanticScholarApiKey } = getConfig();
+  const timeout = AbortSignal.timeout(8000);
+  const citations = await fetchSemanticScholarCitations({
+    apiKey: semanticScholarApiKey,
+    seedPaperId,
+    limit,
+    signal: timeout,
+  });
+
+  return json(200, {
+    data: citations,
     meta: {
       request_id: context.requestId,
       paper_id: seedPaperId,
@@ -999,7 +1063,8 @@ export async function handler(event) {
     }
 
     const route = getRouteSegments(event.path || "/");
-    const isManagementRoute = route[0] === "keys" || route[0] === "recommendations";
+    const isManagementRoute =
+      route[0] === "keys" || route[0] === "recommendations" || route[0] === "references" || route[0] === "citations";
 
     if (isManagementRoute) {
       const authorization = event.headers?.authorization || event.headers?.Authorization || null;
@@ -1039,6 +1104,10 @@ export async function handler(event) {
         response = await handleCreateApiKey(supabase, principal, context, event);
       } else if (route.length === 1 && route[0] === "recommendations" && event.httpMethod === "POST") {
         response = await handlePaperRecommendations(context, event);
+      } else if (route.length === 1 && route[0] === "references" && event.httpMethod === "POST") {
+        response = await handlePaperReferences(context, event);
+      } else if (route.length === 1 && route[0] === "citations" && event.httpMethod === "POST") {
+        response = await handlePaperCitations(context, event);
       } else if (route.length === 2 && route[0] === "keys" && event.httpMethod === "DELETE") {
         response = await handleRevokeApiKey(supabase, principal, context, route[1]);
       } else if (route.length === 3 && route[0] === "keys" && route[2] === "revoke" && event.httpMethod === "POST") {

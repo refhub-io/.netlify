@@ -33,6 +33,7 @@ Use a normal authenticated Supabase user session JWT for:
 - creating keys
 - revoking keys
 - fetching Semantic Scholar recommendations for the add/edit paper dialog
+- fetching Semantic Scholar references/citations for cited/citing traversal in the add/edit paper dialog
 
 Send it as:
 
@@ -146,6 +147,48 @@ Example response:
     "limit": 10
   }
 }
+```
+
+### Paper references
+
+`POST /api/v1/references`
+
+Returns the papers cited by the seed paper. This route is intended for the logged-in RefHub frontend, rejects `rhk_...` credentials, and keeps any configured `SEMANTIC_SCHOLAR_API_KEY` on the server.
+
+```bash
+curl -s \
+  -X POST \
+  -H "Authorization: Bearer $JWT" \
+  -H "Content-Type: application/json" \
+  https://refhub-api.netlify.app/api/v1/references \
+  -d '{
+    "paper_id": "DOI:10.1101/2020.02.20.958025",
+    "limit": 10
+  }'
+```
+
+Request rules:
+
+- `paper_id` is required and must be a non-empty Semantic Scholar-compatible paper identifier
+- `limit` is optional and must be an integer from `1` to `25`
+- the response uses the same lean normalized paper shape as `POST /api/v1/recommendations`
+
+### Paper citations
+
+`POST /api/v1/citations`
+
+Returns the papers citing the seed paper. Authentication, request body, validation rules, and response shape match `POST /api/v1/references`.
+
+```bash
+curl -s \
+  -X POST \
+  -H "Authorization: Bearer $JWT" \
+  -H "Content-Type: application/json" \
+  https://refhub-api.netlify.app/api/v1/citations \
+  -d '{
+    "paper_id": "DOI:10.1101/2020.02.20.958025",
+    "limit": 10
+  }'
 ```
 
 ### List API keys

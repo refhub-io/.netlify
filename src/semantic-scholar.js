@@ -1,5 +1,6 @@
 const DEFAULT_PAPER_LIST_LIMIT = 10;
 const MAX_PAPER_LIST_LIMIT = 25;
+const SEMANTIC_SCHOLAR_LOOKUP_FIELDS = ["paperId"];
 const SEMANTIC_SCHOLAR_PAPER_FIELDS = [
   "paperId",
   "externalIds",
@@ -93,6 +94,56 @@ export function normalizePaperListRequest(body) {
       seedPaperId,
       limit: rawLimit,
     },
+  };
+}
+
+export function normalizePaperLookupRequest(body) {
+  const doi = typeof body?.doi === "string" ? body.doi.trim() : "";
+  const title = typeof body?.title === "string" ? body.title.trim() : "";
+
+  if (doi && title) {
+    return {
+      error: "invalid_lookup_request",
+      message: "Provide exactly one of doi or title",
+    };
+  }
+
+  if (doi) {
+    return {
+      value: {
+        queryType: "doi",
+        queryValue: doi,
+      },
+    };
+  }
+
+  if (title) {
+    return {
+      value: {
+        queryType: "title",
+        queryValue: title,
+      },
+    };
+  }
+
+  return {
+    error: "invalid_lookup_request",
+    message: "Body must include a non-empty doi or title string",
+  };
+}
+
+export function normalizeSemanticScholarDoiRequest(body) {
+  const doi = typeof body?.doi === "string" ? body.doi.trim() : "";
+
+  if (!doi) {
+    return {
+      error: "invalid_doi",
+      message: "Body must include a non-empty doi string",
+    };
+  }
+
+  return {
+    value: { doi },
   };
 }
 
@@ -277,4 +328,167 @@ export async function fetchSemanticScholarCitations({ apiKey, seedPaperId, limit
     responseItemsPath: ["data"],
     paperKey: "citingPaper",
   });
+}
+
+export async function fetchSemanticScholarPaperLookup({ apiKey, queryType, queryValue, signal }) {
+  const headers = {
+    accept: "application/json",
+  };
+
+  if (apiKey) {
+    headers["x-api-key"] = apiKey;
+  }
+
+  const url =
+    queryType === "doi"
+      ? new URL(`https://api.semanticscholar.org/graph/v1/paper/DOI:${encodeURIComponent(queryValue)}`)
+      : new URL("https://api.semanticscholar.org/graph/v1/paper/search");
+
+  url.searchParams.set("fields", SEMANTIC_SCHOLAR_LOOKUP_FIELDS.join(","));
+  if (queryType === "title") {
+    url.searchParams.set("query", queryValue);
+    url.searchParams.set("limit", "1");
+  }
+
+  let response;
+  try {
+    response = await fetch(url, {
+      method: "GET",
+      headers,
+      signal,
+    });
+  } catch (error) {
+    if (error?.name === "TimeoutError" || error?.name === "AbortError") {
+      throw createSemanticScholarError(
+        "semantic_scholar_timeout",
+        "Semantic Scholar request timed out",
+        504,
+      );
+    }
+
+    throw createSemanticScholarError(
+      "semantic_scholar_unreachable",
+      "Semantic Scholar request could not be completed",
+      502,
+    );
+  }
+
+  if (response.status === 404 && queryType === "doi") {
+    return null;
+  }
+
+  if (response.status === 429) {
+    throw createSemanticScholarError(
+      "semantic_scholar_rate_limited",
+      "Semantic Scholar rate limit exceeded",
+      503,
+    );
+  }
+
+  if (!response.ok) {
+    throw createSemanticScholarError(
+      "semantic_scholar_error",
+      "Semantic Scholar request failed",
+      502,
+      { upstream_status: response.status },
+    );
+  }
+
+  const payload = await response.json();
+  const paperId =
+    queryType === "doi"
+      ? payload?.paperId
+      : Array.isArray(payload?.data)
+        ? payload.data[0]?.paperId
+        : null;
+
+  return typeof paperId === "string" && paperId.trim() ? paperId : null;
+}
+
+export async function fetchSemanticScholarDoiMetadata({ apiKey, doi, signal }) {
+  const headers = {
+    accept: "application/json",
+  };
+
+  if (apiKey) {
+    headers["x-api-key"] = apiKey;
+  }
+
+  const url = new URL(`https://api.semanticscholar.org/graph/v1/paper/DOI:${encodeURIComponent(doi)}`);
+  url.searchParams.set(
+    "fields",
+    ["title", "authors", "year", "venue", "publicationVenue", "abstract", "externalIds", "publicationTypes"].join(","),
+  );
+
+  let response;
+  try {
+    response = await fetch(url, {
+      method: "GET",
+      headers,
+      signal,
+    });
+  } catch (error) {
+    if (error?.name === "TimeoutError" || error?.name === "AbortError") {
+      throw createSemanticScholarError(
+        "semantic_scholar_timeout",
+        "Semantic Scholar request timed out",
+        504,
+      );
+    }
+
+    throw createSemanticScholarError(
+      "semantic_scholar_unreachable",
+      "Semantic Scholar request could not be completed",
+      502,
+    );
+  }
+
+  if (response.status === 404) {
+    return null;
+  }
+
+  if (response.status === 429) {
+    throw createSemanticScholarError(
+      "semantic_scholar_rate_limited",
+      "Semantic Scholar rate limit exceeded",
+      503,
+    );
+  }
+
+  if (!response.ok) {
+    throw createSemanticScholarError(
+      "semantic_scholar_error",
+      "Semantic Scholar request failed",
+      502,
+      { upstream_status: response.status },
+    );
+  }
+
+  const work = await response.json();
+  const authors = Array.isArray(work?.authors)
+    ? work.authors.map((author) => author?.name || "Unknown Author")
+    : [];
+
+  let publicationType = "article";
+  const types = Array.isArray(work?.publicationTypes) ? work.publicationTypes : [];
+  if (types.includes("Book") || types.includes("BookSection")) {
+    publicationType = "book";
+  } else if (types.includes("Conference")) {
+    publicationType = "inproceedings";
+  } else if (types.includes("Dissertation")) {
+    publicationType = "thesis";
+  } else if (types.includes("Report")) {
+    publicationType = "report";
+  }
+
+  return {
+    title: work?.title || "Untitled",
+    authors,
+    year: work?.year || undefined,
+    journal: work?.venue || work?.publicationVenue?.name || undefined,
+    doi,
+    url: `https://doi.org/${doi}`,
+    abstract: work?.abstract || undefined,
+    type: publicationType,
+  };
 }

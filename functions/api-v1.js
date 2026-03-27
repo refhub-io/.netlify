@@ -23,10 +23,14 @@ import {
 } from "../src/http.js";
 import {
   fetchSemanticScholarCitations,
+  fetchSemanticScholarDoiMetadata,
+  fetchSemanticScholarPaperLookup,
   fetchSemanticScholarRecommendations,
   fetchSemanticScholarReferences,
   isRefHubApiKeyValue,
   normalizePaperListRequest,
+  normalizePaperLookupRequest,
+  normalizeSemanticScholarDoiRequest,
 } from "../src/semantic-scholar.js";
 
 const PUBLICATION_FIELDS = [
@@ -578,6 +582,135 @@ async function handlePaperReferences(context, event, principal) {
 async function handlePaperCitations(context, event, principal) {
   return handleSemanticScholarPaperRoute(context, event, principal, "citations", fetchSemanticScholarCitations);
 }
+
+async function handlePaperLookup(context, event, principal) {
+  const parsedBody = parseJsonBody(event);
+  if (!parsedBody.ok) {
+    return errorResponse(400, "invalid_json", "Request body must be valid JSON", context.requestId);
+  }
+
+  const normalizedRequest = normalizePaperLookupRequest(parsedBody.value || {});
+  if (normalizedRequest.error) {
+    return errorResponse(400, normalizedRequest.error, normalizedRequest.message, context.requestId);
+  }
+
+  const { queryType, queryValue } = normalizedRequest.value;
+  const cacheKey = `lookup:${queryType}:${queryValue}`;
+  const cached = getCachedSemanticScholarValue(cacheKey);
+  const paperId = cached.hit
+    ? await cached.value
+    : await (async () => {
+      const rateLimit = takeSemanticScholarRateLimit(principal?.userId);
+      if (!rateLimit.allowed) {
+        return json(
+          429,
+          {
+            error: {
+              code: "rate_limit_exceeded",
+              message: "Too many Semantic Scholar requests; please retry shortly",
+              details: {
+                retry_after_seconds: rateLimit.retryAfterSeconds,
+              },
+            },
+            meta: {
+              request_id: context.requestId,
+            },
+          },
+          {
+            "retry-after": String(rateLimit.retryAfterSeconds),
+          },
+        );
+      }
+
+      const { semanticScholarApiKey } = getConfig();
+      const timeout = AbortSignal.timeout(8000);
+      return getCachedSemanticScholarResponse(cacheKey, () =>
+        fetchSemanticScholarPaperLookup({
+          apiKey: semanticScholarApiKey,
+          queryType,
+          queryValue,
+          signal: timeout,
+        })
+      );
+    })();
+
+  if (paperId?.statusCode) {
+    return paperId;
+  }
+
+  return json(200, {
+    data: {
+      paper_id: paperId,
+    },
+    meta: {
+      request_id: context.requestId,
+      query_type: queryType,
+    },
+  });
+}
+async function handleSemanticScholarDoiMetadataRoute(context, event, principal) {
+  const parsedBody = parseJsonBody(event);
+  if (!parsedBody.ok) {
+    return errorResponse(400, "invalid_json", "Request body must be valid JSON", context.requestId);
+  }
+
+  const normalizedRequest = normalizeSemanticScholarDoiRequest(parsedBody.value || {});
+  if (normalizedRequest.error) {
+    return errorResponse(400, normalizedRequest.error, normalizedRequest.message, context.requestId);
+  }
+
+  const { doi } = normalizedRequest.value;
+  const cacheKey = `doi-metadata:${doi}`;
+  const cached = getCachedSemanticScholarValue(cacheKey);
+  const metadata = cached.hit
+    ? await cached.value
+    : await (async () => {
+      const rateLimit = takeSemanticScholarRateLimit(principal?.userId);
+      if (!rateLimit.allowed) {
+        return json(
+          429,
+          {
+            error: {
+              code: "rate_limit_exceeded",
+              message: "Too many Semantic Scholar requests; please retry shortly",
+              details: {
+                retry_after_seconds: rateLimit.retryAfterSeconds,
+              },
+            },
+            meta: {
+              request_id: context.requestId,
+            },
+          },
+          {
+            "retry-after": String(rateLimit.retryAfterSeconds),
+          },
+        );
+      }
+
+      const { semanticScholarApiKey } = getConfig();
+      const timeout = AbortSignal.timeout(8000);
+      return getCachedSemanticScholarResponse(cacheKey, () =>
+        fetchSemanticScholarDoiMetadata({
+          apiKey: semanticScholarApiKey,
+          doi,
+          signal: timeout,
+        })
+      );
+    })();
+
+  if (metadata?.statusCode) {
+    return metadata;
+  }
+
+  return json(200, {
+    data: metadata,
+    meta: {
+      request_id: context.requestId,
+      doi,
+    },
+  });
+}
+
 
 
 function pickPublicationFields(input) {
@@ -1143,7 +1276,7 @@ export async function handler(event) {
 
     const route = getRouteSegments(event.path || "/");
     const isManagementRoute =
-      route[0] === "keys" || route[0] === "recommendations" || route[0] === "references" || route[0] === "citations";
+      route[0] === "keys" || route[0] === "recommendations" || route[0] === "references" || route[0] === "citations" || route[0] === "lookup" || route[0] === "doi-metadata";
 
     if (isManagementRoute) {
       const authorization = event.headers?.authorization || event.headers?.Authorization || null;
@@ -1187,6 +1320,10 @@ export async function handler(event) {
         response = await handlePaperReferences(context, event, principal);
       } else if (route.length === 1 && route[0] === "citations" && event.httpMethod === "POST") {
         response = await handlePaperCitations(context, event, principal);
+      } else if (route.length === 1 && route[0] === "lookup" && event.httpMethod === "POST") {
+        response = await handlePaperLookup(context, event, principal);
+      } else if (route.length === 1 && route[0] === "doi-metadata" && event.httpMethod === "POST") {
+        response = await handleSemanticScholarDoiMetadataRoute(context, event, principal);
       } else if (route.length === 2 && route[0] === "keys" && event.httpMethod === "DELETE") {
         response = await handleRevokeApiKey(supabase, principal, context, route[1]);
       } else if (route.length === 3 && route[0] === "keys" && route[2] === "revoke" && event.httpMethod === "POST") {

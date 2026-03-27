@@ -81,6 +81,7 @@ const VAULT_PUBLICATION_SELECT = [
   ...PUBLICATION_FIELDS,
 ].join(", ");
 const SEMANTIC_SCHOLAR_CACHE_TTL_MS = 60 * 1000;
+const SEMANTIC_SCHOLAR_CACHE_STALE_TTL_MS = 10 * 60 * 1000;
 const SEMANTIC_SCHOLAR_RATE_LIMIT_WINDOW_MS = 60 * 1000;
 const SEMANTIC_SCHOLAR_RATE_LIMIT_MAX_REQUESTS = 12;
 const semanticScholarResponseCache = new Map();
@@ -105,7 +106,7 @@ function toSafeErrorResponse(error, requestId) {
 
 function pruneSemanticScholarState(now = Date.now()) {
   for (const [key, entry] of semanticScholarResponseCache.entries()) {
-    if (!entry.promise && entry.expiresAt <= now) {
+    if (!entry.promise && (entry.staleUntil || entry.expiresAt) <= now) {
       semanticScholarResponseCache.delete(key);
     }
   }
@@ -156,6 +157,17 @@ function getCachedSemanticScholarValue(cacheKey, now = Date.now()) {
   return { hit: false, value: null };
 }
 
+function getStaleSemanticScholarValue(cacheKey, now = Date.now()) {
+  pruneSemanticScholarState(now);
+
+  const existing = semanticScholarResponseCache.get(cacheKey);
+  if (existing?.value && (existing.staleUntil || existing.expiresAt) > now) {
+    return { hit: true, value: existing.value };
+  }
+
+  return { hit: false, value: null };
+}
+
 async function getCachedSemanticScholarResponse(cacheKey, fetcher, now = Date.now()) {
   pruneSemanticScholarState(now);
 
@@ -174,6 +186,7 @@ async function getCachedSemanticScholarResponse(cacheKey, fetcher, now = Date.no
       semanticScholarResponseCache.set(cacheKey, {
         value,
         expiresAt: Date.now() + SEMANTIC_SCHOLAR_CACHE_TTL_MS,
+        staleUntil: Date.now() + SEMANTIC_SCHOLAR_CACHE_STALE_TTL_MS,
       });
       return value;
     } catch (error) {
@@ -185,6 +198,7 @@ async function getCachedSemanticScholarResponse(cacheKey, fetcher, now = Date.no
   semanticScholarResponseCache.set(cacheKey, {
     promise,
     expiresAt: now + SEMANTIC_SCHOLAR_CACHE_TTL_MS,
+    staleUntil: now + SEMANTIC_SCHOLAR_CACHE_STALE_TTL_MS,
   });
 
   return promise;
@@ -595,6 +609,19 @@ async function handlePaperLookup(context, event, principal) {
   }
 
   const { queryType, queryValue } = normalizedRequest.value;
+  if (queryType === "doi") {
+    const normalizedDoi = queryValue.replace(/^doi:/i, "").trim();
+    return json(200, {
+      data: {
+        paper_id: `DOI:${normalizedDoi}`,
+      },
+      meta: {
+        request_id: context.requestId,
+        query_type: queryType,
+      },
+    });
+  }
+
   const cacheKey = `lookup:${queryType}:${queryValue}`;
   const cached = getCachedSemanticScholarValue(cacheKey);
   const paperId = cached.hit
@@ -624,14 +651,23 @@ async function handlePaperLookup(context, event, principal) {
 
       const { semanticScholarApiKey } = getConfig();
       const timeout = AbortSignal.timeout(8000);
-      return getCachedSemanticScholarResponse(cacheKey, () =>
-        fetchSemanticScholarPaperLookup({
-          apiKey: semanticScholarApiKey,
-          queryType,
-          queryValue,
-          signal: timeout,
-        })
-      );
+      try {
+        return await getCachedSemanticScholarResponse(cacheKey, () =>
+          fetchSemanticScholarPaperLookup({
+            apiKey: semanticScholarApiKey,
+            queryType,
+            queryValue,
+            signal: timeout,
+          })
+        );
+      } catch (error) {
+        const stale = getStaleSemanticScholarValue(cacheKey);
+        if (error?.code === "semantic_scholar_rate_limited" && stale.hit) {
+          return stale.value;
+        }
+
+        throw error;
+      }
     })();
 
   if (paperId?.statusCode) {

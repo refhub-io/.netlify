@@ -16,7 +16,21 @@ export function getConfig() {
     supabaseUrl: readRequired("SUPABASE_URL"),
     supabaseServiceRoleKey: readRequired("SUPABASE_SERVICE_ROLE_KEY"),
     apiKeyPepper: readRequired("REFHUB_API_KEY_PEPPER"),
+    appBaseUrl: process.env.REFHUB_APP_BASE_URL || null,
     semanticScholarApiKey: process.env.SEMANTIC_SCHOLAR_API_KEY || null,
+    googleDriveClientId: process.env.GOOGLE_DRIVE_CLIENT_ID || null,
+    googleDriveClientSecret: process.env.GOOGLE_DRIVE_CLIENT_SECRET || null,
+    googleDriveRedirectUri: process.env.GOOGLE_DRIVE_REDIRECT_URI || null,
+    googleDriveStateSecret: process.env.GOOGLE_DRIVE_STATE_SECRET || null,
+    googleDriveTokenSecret: process.env.GOOGLE_DRIVE_TOKEN_SECRET || null,
+    googleDriveFolderName: process.env.GOOGLE_DRIVE_FOLDER_NAME || "refhub",
+    googleDriveMaxUploadBytes: (() => {
+      const n = Number(process.env.GOOGLE_DRIVE_MAX_UPLOAD_BYTES || 25 * 1024 * 1024);
+      if (!Number.isInteger(n) || n < 1) {
+        throw new Error("GOOGLE_DRIVE_MAX_UPLOAD_BYTES must be a positive integer");
+      }
+      return n;
+    })(),
     maxBulkItems: (() => {
       const n = Number(process.env.REFHUB_API_MAX_BULK_ITEMS || DEFAULT_MAX_BULK_ITEMS);
       if (!Number.isInteger(n) || n < 1) {

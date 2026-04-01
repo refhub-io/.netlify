@@ -92,6 +92,38 @@ Item writes are covered by `vaults:write`.
 
 These routes require a **Supabase session JWT**.
 
+### Google Drive link status
+
+`GET /api/v1/google-drive`
+
+Returns whether the signed-in RefHub user has linked Google Drive and whether the managed `refhub` folder is ready for PDF storage.
+
+### Start Google Drive link
+
+`POST /api/v1/google-drive/connect`
+
+Returns a backend-generated Google OAuth `authorization_url`.
+
+Request body:
+
+```json
+{
+  "return_to": "https://refhub.io/profile-edit?tab=storage"
+}
+```
+
+### Ensure Drive folder
+
+`POST /api/v1/google-drive/folder`
+
+Finds or recreates the managed `refhub` folder in the linked Drive account.
+
+### Disconnect Google Drive
+
+`DELETE /api/v1/google-drive`
+
+Removes the stored Drive link and best-effort revokes the linked Google refresh token.
+
 ### Paper recommendations
 
 `POST /api/v1/recommendations`
@@ -402,6 +434,20 @@ curl -s \
   }'
 ```
 
+To ask the backend to copy a discovered `pdf_url` into the linked Google Drive folder during save:
+
+```json
+{
+  "items": [
+    {
+      "title": "Some Paper",
+      "pdf_url": "https://example.com/paper.pdf"
+    }
+  ],
+  "store_pdfs_in_google_drive": true
+}
+```
+
 You can also attach existing vault tags:
 
 ```json
@@ -423,7 +469,20 @@ Notes:
 - `tag_ids` must already exist in the target vault
 - the backend does not create tags implicitly
 - requests larger than `REFHUB_API_MAX_BODY_BYTES` are rejected
+- `store_pdfs_in_google_drive` currently supports single-item saves only
 - true database atomicity is not guaranteed yet; current logic prevalidates and attempts rollback on downstream failure
+
+### Extension Google Drive status
+
+Requires scope: `vaults:read`
+
+```bash
+curl -s \
+  -H "Authorization: Bearer $RHK" \
+  https://refhub-api.netlify.app/api/v1/extension/google-drive-status
+```
+
+This lightweight route lets the browser extension detect whether the RefHub account behind the API key has Drive-backed PDF storage enabled.
 
 ### Update an item
 

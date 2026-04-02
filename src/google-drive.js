@@ -153,7 +153,16 @@ function decryptSecret(value) {
 }
 
 async function fetchGoogleJson(url, init, requestLabel) {
-  const response = await fetch(url, init);
+  let response;
+  try {
+    response = await fetch(url, init);
+  } catch (cause) {
+    const error = new Error(`${requestLabel} network request failed: ${cause?.message || "fetch failed"}`);
+    error.code = `${requestLabel}_network_error`;
+    error.status = 502;
+    error.cause = cause;
+    throw error;
+  }
   const payload = await response.json().catch(() => null);
 
   if (!response.ok) {
@@ -261,7 +270,13 @@ async function getStoredLink(supabase, userId) {
 }
 
 async function upsertStoredLink(supabase, row) {
-  const result = await supabase.from("user_google_drive_links").upsert(row).select("*").single();
+  const result = await supabase
+    .from("user_google_drive_links")
+    .upsert(row, {
+      onConflict: "user_id",
+    })
+    .select("*")
+    .single();
   if (result.error) {
     throw result.error;
   }
@@ -340,6 +355,61 @@ async function getFreshDriveAccess(link, supabase) {
   };
 }
 
+async function ensureGoogleDriveFolderWithAccessToken(supabase, userId, accessToken) {
+  const link = await getStoredLink(supabase, userId);
+  if (!link) {
+    const error = new Error("Google Drive is not linked for this account.");
+    error.code = "google_drive_not_linked";
+    throw error;
+  }
+
+  const config = requireGoogleDriveConfig();
+  let folder = null;
+
+  if (link.drive_folder_id) {
+    try {
+      folder = await driveRequest(
+        accessToken,
+        `/files/${encodeURIComponent(link.drive_folder_id)}?fields=id,name,mimeType,trashed`,
+        { method: "GET" },
+      );
+      if (folder?.mimeType !== GOOGLE_DRIVE_FOLDER_MIME_TYPE || folder?.trashed) {
+        folder = null;
+      }
+    } catch (error) {
+      if (error.status !== 404) {
+        throw error;
+      }
+    }
+  }
+
+  if (!folder) {
+    const searchResult = await driveRequest(accessToken, buildFolderSearchUrl(config.googleDriveFolderName), {
+      method: "GET",
+    });
+    folder = searchResult?.files?.[0] || null;
+  }
+
+  if (!folder) {
+    folder = await createFolder(accessToken, config.googleDriveFolderName);
+  }
+
+  const updated = await upsertStoredLink(supabase, {
+    user_id: userId,
+    google_drive_email: link.google_drive_email,
+    encrypted_refresh_token: link.encrypted_refresh_token,
+    scope: link.scope || GOOGLE_DRIVE_SCOPE,
+    drive_folder_id: folder.id,
+    drive_folder_name: folder.name,
+    drive_folder_status: "ready",
+    last_linked_at: link.last_linked_at || new Date().toISOString(),
+    last_checked_at: new Date().toISOString(),
+    last_error: null,
+  });
+
+  return toDriveStatus(updated);
+}
+
 export function createGoogleDriveAuthorizationUrl({ userId, returnTo }) {
   const config = requireGoogleDriveConfig();
   const payload = JSON.stringify({
@@ -414,52 +484,8 @@ export async function ensureGoogleDriveFolderForUser(supabase, userId) {
     throw error;
   }
 
-  const config = requireGoogleDriveConfig();
   const { accessToken } = await getFreshDriveAccess(link, supabase);
-  let folder = null;
-
-  if (link.drive_folder_id) {
-    try {
-      folder = await driveRequest(
-        accessToken,
-        `/files/${encodeURIComponent(link.drive_folder_id)}?fields=id,name,mimeType,trashed`,
-        { method: "GET" },
-      );
-      if (folder?.mimeType !== GOOGLE_DRIVE_FOLDER_MIME_TYPE || folder?.trashed) {
-        folder = null;
-      }
-    } catch (error) {
-      if (error.status !== 404) {
-        throw error;
-      }
-    }
-  }
-
-  if (!folder) {
-    const searchResult = await driveRequest(accessToken, buildFolderSearchUrl(config.googleDriveFolderName), {
-      method: "GET",
-    });
-    folder = searchResult?.files?.[0] || null;
-  }
-
-  if (!folder) {
-    folder = await createFolder(accessToken, config.googleDriveFolderName);
-  }
-
-  const updated = await upsertStoredLink(supabase, {
-    user_id: userId,
-    google_drive_email: link.google_drive_email,
-    encrypted_refresh_token: link.encrypted_refresh_token,
-    scope: link.scope || GOOGLE_DRIVE_SCOPE,
-    drive_folder_id: folder.id,
-    drive_folder_name: folder.name,
-    drive_folder_status: "ready",
-    last_linked_at: link.last_linked_at || new Date().toISOString(),
-    last_checked_at: new Date().toISOString(),
-    last_error: null,
-  });
-
-  return toDriveStatus(updated);
+  return ensureGoogleDriveFolderWithAccessToken(supabase, userId, accessToken);
 }
 
 export async function completeGoogleDriveLink(supabase, { state, code, error: oauthError }) {
@@ -493,7 +519,7 @@ export async function completeGoogleDriveLink(supabase, { state, code, error: oa
   });
 
   try {
-    await ensureGoogleDriveFolderForUser(supabase, payload.userId);
+    await ensureGoogleDriveFolderWithAccessToken(supabase, payload.userId, tokenPayload.access_token);
     redirectUrl.searchParams.set("gdrive", "connected");
   } catch (error) {
     await upsertStoredLink(supabase, {

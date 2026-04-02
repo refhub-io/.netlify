@@ -1038,7 +1038,6 @@ async function handleAddItems(supabase, principal, context, vaultId, event) {
   }
 
   const items = parsedBody.value?.items;
-  const storePdfsInGoogleDrive = parsedBody.value?.store_pdfs_in_google_drive === true;
   const { maxBulkItems } = getConfig();
 
   if (!Array.isArray(items) || items.length === 0) {
@@ -1047,15 +1046,6 @@ async function handleAddItems(supabase, principal, context, vaultId, event) {
 
   if (items.length > maxBulkItems) {
     return errorResponse(400, "too_many_items", `Maximum bulk size is ${maxBulkItems}`, context.requestId);
-  }
-
-  if (storePdfsInGoogleDrive && items.length > 1) {
-    return errorResponse(
-      400,
-      "google_drive_bulk_not_supported",
-      "Google Drive PDF storage currently supports single-item saves only.",
-      context.requestId,
-    );
   }
 
   for (const item of items) {
@@ -1128,28 +1118,7 @@ async function handleAddItems(supabase, principal, context, vaultId, event) {
         }
       }
 
-      let createdItem = vaultPublicationInsert.data;
-
-      if (storePdfsInGoogleDrive && vaultPublicationInsert.data.pdf_url) {
-        const pdfStorage = await uploadPdfToGoogleDriveForUser({
-          supabase,
-          userId: principal.userId,
-          publicationId: publicationInsert.data.id,
-          vaultPublicationId: vaultPublicationInsert.data.id,
-          title: vaultPublicationInsert.data.title,
-          year: vaultPublicationInsert.data.year,
-          sourceUrl: vaultPublicationInsert.data.pdf_url,
-        });
-
-        // Preserve the original source pdf_url on publications and vault_publications.
-        // The Drive URL is stored in publication_pdf_assets.stored_pdf_url.
-        createdItem = {
-          ...createdItem,
-          pdf_storage: pdfStorage,
-        };
-      }
-
-      created.push(createdItem);
+      created.push(vaultPublicationInsert.data);
     }
   } catch (error) {
     let rollbackFailed = false;
@@ -1216,6 +1185,70 @@ async function handleAddItems(supabase, principal, context, vaultId, event) {
       request_id: context.requestId,
       vault_id: vaultId,
     },
+  });
+}
+
+async function handleUploadItemPdf(supabase, principal, context, event, vaultId, itemId) {
+  if (!requireScope(principal, API_SCOPES.WRITE)) {
+    return errorResponse(403, "missing_scope", "Scope vaults:write is required", context.requestId);
+  }
+
+  const access = await resolveVaultAccess(supabase, principal, vaultId, "editor");
+  if (!access.ok) {
+    return errorResponse(access.status, access.code, "Vault write access denied", context.requestId);
+  }
+
+  if (!event.body) {
+    return errorResponse(400, "missing_body", "Request body must be a PDF binary", context.requestId);
+  }
+
+  // Netlify base64-encodes binary request bodies
+  const pdfBuffer = event.isBase64Encoded
+    ? Buffer.from(event.body, "base64")
+    : Buffer.from(event.body, "binary");
+
+  // Validate PDF magic bytes (%PDF-)
+  if (pdfBuffer.length < 5 || pdfBuffer[0] !== 0x25 || pdfBuffer[1] !== 0x50 || pdfBuffer[2] !== 0x44 || pdfBuffer[3] !== 0x46) {
+    return errorResponse(400, "invalid_pdf", "Request body does not appear to be a valid PDF", context.requestId);
+  }
+
+  const { data: vaultPub, error: vpError } = await supabase
+    .from("vault_publications")
+    .select("id, original_publication_id, title, year, doi")
+    .eq("id", itemId)
+    .eq("vault_id", vaultId)
+    .single();
+
+  if (vpError || !vaultPub) {
+    return errorResponse(404, "item_not_found", "Vault item not found", context.requestId);
+  }
+
+  console.log("[pdf-upload] received PDF for vault_pub", { itemId, vaultId, bytes: pdfBuffer.length });
+
+  const result = await uploadPdfToGoogleDriveForUser({
+    supabase,
+    userId: principal.userId,
+    publicationId: vaultPub.original_publication_id,
+    vaultPublicationId: vaultPub.id,
+    title: vaultPub.title,
+    year: vaultPub.year,
+    doi: vaultPub.doi,
+    sourceUrl: null,
+    pdfBuffer,
+  });
+
+  if (!result.stored) {
+    return errorResponse(
+      502,
+      result.code || "drive_upload_failed",
+      result.message || "PDF upload to Drive failed",
+      context.requestId,
+    );
+  }
+
+  return json(200, {
+    data: result,
+    meta: { request_id: context.requestId },
   });
 }
 
@@ -1569,6 +1602,8 @@ export async function handler(event) {
         response = await handleReadVault(supabase, principal, context, route[1]);
       } else if (route.length === 3 && route[0] === "vaults" && route[2] === "items" && event.httpMethod === "POST") {
         response = await handleAddItems(supabase, principal, context, route[1], event);
+      } else if (route.length === 5 && route[0] === "vaults" && route[2] === "items" && route[4] === "pdf" && event.httpMethod === "POST") {
+        response = await handleUploadItemPdf(supabase, principal, context, event, route[1], route[3]);
       } else if (route.length === 4 && route[0] === "vaults" && route[2] === "items" && event.httpMethod === "PATCH") {
         response = await handleUpdateItem(supabase, principal, context, route[1], route[3], event);
       } else if (route.length === 3 && route[0] === "vaults" && route[2] === "export" && event.httpMethod === "GET") {

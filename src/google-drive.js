@@ -622,6 +622,36 @@ async function upsertPdfAssetRecord(supabase, record) {
   return result.data;
 }
 
+async function resolveOpenAccessPdfUrl(doi, fallbackUrl) {
+  if (!doi) {
+    return { url: fallbackUrl, via: "source" };
+  }
+
+  try {
+    const response = await fetch(
+      `https://api.unpaywall.org/v2/${encodeURIComponent(doi)}?email=refhub-bot@refhub.io`,
+      { headers: { "user-agent": "RefHubBot/1.0 (+https://refhub.io)" } },
+    );
+
+    if (!response.ok) {
+      console.log("[drive] unpaywall lookup failed", { doi, status: response.status });
+      return { url: fallbackUrl, via: "source" };
+    }
+
+    const data = await response.json();
+    const oaUrl = data?.best_oa_location?.url_for_pdf || data?.best_oa_location?.url_for_landing_page;
+    console.log("[drive] unpaywall result", { doi, isOa: data?.is_oa, oaUrl });
+
+    if (oaUrl && oaUrl !== fallbackUrl) {
+      return { url: oaUrl, via: "unpaywall" };
+    }
+  } catch (err) {
+    console.log("[drive] unpaywall error", { doi, message: err.message });
+  }
+
+  return { url: fallbackUrl, via: "source" };
+}
+
 export async function uploadPdfToGoogleDriveForUser({
   supabase,
   userId,
@@ -629,7 +659,9 @@ export async function uploadPdfToGoogleDriveForUser({
   vaultPublicationId,
   title,
   year,
+  doi,
   sourceUrl,
+  pdfBuffer: suppliedBuffer,
 }) {
   const link = await getStoredLink(supabase, userId);
   if (!link) {
@@ -642,50 +674,70 @@ export async function uploadPdfToGoogleDriveForUser({
     };
   }
 
+  console.log("[drive] upload attempt", { userId, doi, sourceUrl, title, year, clientSupplied: Boolean(suppliedBuffer) });
+
   try {
     const folder = await ensureGoogleDriveFolderForUser(supabase, userId);
+    console.log("[drive] folder ready", { folderId: folder.folderId, folderName: folder.folderName });
+
     const { accessToken } = await getFreshDriveAccess(link, supabase);
-    validateSourceUrl(sourceUrl);
-    const response = await fetch(sourceUrl, {
-      method: "GET",
-      redirect: "follow",
-      headers: {
-        "accept": "application/pdf,application/octet-stream,*/*;q=0.8",
-        "user-agent": "RefHubBot/1.0 (+https://refhub.io)",
-      },
-    });
-
-    if (!response.ok) {
-      throw new Error(`Failed to fetch PDF source (${response.status}).`);
-    }
-
     const config = requireGoogleDriveConfig();
-    const contentLength = Number(response.headers.get("content-length") || 0);
-    if (contentLength && contentLength > config.googleDriveMaxUploadBytes) {
-      throw new Error(`PDF exceeds upload limit (${config.googleDriveMaxUploadBytes} bytes).`);
+
+    let pdfBuffer;
+    if (suppliedBuffer) {
+      // Extension fetched the PDF using the user's browser session (institutional access)
+      pdfBuffer = suppliedBuffer;
+      console.log("[drive] using client-supplied PDF buffer", { bytes: pdfBuffer.length });
+    } else {
+      const { url: fetchUrl, via } = await resolveOpenAccessPdfUrl(doi, sourceUrl);
+      validateSourceUrl(fetchUrl);
+
+      console.log("[drive] fetching PDF server-side", { fetchUrl, via });
+      const response = await fetch(fetchUrl, {
+        method: "GET",
+        redirect: "follow",
+        headers: {
+          "accept": "application/pdf,application/octet-stream,*/*;q=0.8",
+          "user-agent": "RefHubBot/1.0 (+https://refhub.io)",
+        },
+      });
+
+      const contentType = response.headers.get("content-type") || "";
+      const contentLength = response.headers.get("content-length") || "unknown";
+      console.log("[drive] PDF fetch response", { status: response.status, contentType, contentLength, finalUrl: response.url, via });
+
+      if (!response.ok) {
+        throw new Error(`Failed to fetch PDF source (${response.status})${via === "unpaywall" ? " via Unpaywall" : ""}.`);
+      }
+
+      if (Number(contentLength) && Number(contentLength) > config.googleDriveMaxUploadBytes) {
+        throw new Error(`PDF exceeds upload limit (${config.googleDriveMaxUploadBytes} bytes).`);
+      }
+
+      const isPdfContentType = /pdf|octet-stream/i.test(contentType);
+      const isPdfUrl = /\.pdf(\?|$)|\/e?pdf(direct|ft)?[/?]/i.test(sourceUrl);
+      if (!isPdfContentType && !isPdfUrl) {
+        throw new Error("RefHub could not confirm that the source URL returned a PDF.");
+      }
+
+      pdfBuffer = Buffer.from(await response.arrayBuffer());
+      console.log("[drive] PDF buffered", { bytes: pdfBuffer.length });
     }
 
-    const contentType = response.headers.get("content-type") || "";
-    // Accept application/pdf, application/octet-stream (common for binary downloads),
-    // and URLs whose path signals a PDF (/doi/pdf/, /content/pdf/, pdfdirect, .pdf ext).
-    const isPdfContentType = /pdf|octet-stream/i.test(contentType);
-    const isPdfUrl = /\.pdf(\?|$)|\/e?pdf(direct|ft)?[/?]/i.test(sourceUrl);
-    if (!isPdfContentType && !isPdfUrl) {
-      throw new Error("RefHub could not confirm that the source URL returned a PDF.");
-    }
-
-    const pdfBuffer = Buffer.from(await response.arrayBuffer());
     if (pdfBuffer.length > config.googleDriveMaxUploadBytes) {
       throw new Error(`PDF exceeds upload limit (${config.googleDriveMaxUploadBytes} bytes).`);
     }
 
-    const uploaded = await uploadDriveFile(accessToken, folder.folderId, buildPdfName(title, year), pdfBuffer);
+    const filename = buildPdfName(title, year);
+    const uploaded = await uploadDriveFile(accessToken, folder.folderId, filename, pdfBuffer);
+    console.log("[drive] uploaded to Drive", { fileId: uploaded.id, filename, webViewLink: uploaded.webViewLink });
+
     await upsertPdfAssetRecord(supabase, {
       user_id: userId,
       publication_id: publicationId,
       vault_publication_id: vaultPublicationId,
       storage_provider: "google_drive",
-      source_pdf_url: sourceUrl,
+      source_pdf_url: fetchUrl,
       stored_pdf_url: uploaded.webViewLink || uploaded.webContentLink || null,
       stored_file_id: uploaded.id,
       status: "stored",
@@ -703,6 +755,8 @@ export async function uploadPdfToGoogleDriveForUser({
       sourceUrl,
     };
   } catch (error) {
+    console.error("[drive] upload failed", { userId, sourceUrl, code: error.code, message: error.message });
+
     await upsertPdfAssetRecord(supabase, {
       user_id: userId,
       publication_id: publicationId,

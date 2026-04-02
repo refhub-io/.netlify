@@ -1131,37 +1131,12 @@ async function handleAddItems(supabase, principal, context, vaultId, event) {
           sourceUrl: vaultPublicationInsert.data.pdf_url,
         });
 
-        if (pdfStorage.stored && pdfStorage.pdfUrl) {
-          const publicationUpdate = await supabase
-            .from("publications")
-            .update({ pdf_url: pdfStorage.pdfUrl })
-            .eq("id", publicationInsert.data.id);
-
-          if (publicationUpdate.error) {
-            throw publicationUpdate.error;
-          }
-
-          const vaultPublicationUpdate = await supabase
-            .from("vault_publications")
-            .update({ pdf_url: pdfStorage.pdfUrl })
-            .eq("id", vaultPublicationInsert.data.id)
-            .select(VAULT_PUBLICATION_SELECT)
-            .single();
-
-          if (vaultPublicationUpdate.error) {
-            throw vaultPublicationUpdate.error;
-          }
-
-          createdItem = {
-            ...vaultPublicationUpdate.data,
-            pdf_storage: pdfStorage,
-          };
-        } else {
-          createdItem = {
-            ...createdItem,
-            pdf_storage: pdfStorage,
-          };
-        }
+        // Preserve the original source pdf_url on publications and vault_publications.
+        // The Drive URL is stored in publication_pdf_assets.stored_pdf_url.
+        createdItem = {
+          ...createdItem,
+          pdf_storage: pdfStorage,
+        };
       }
 
       created.push(createdItem);

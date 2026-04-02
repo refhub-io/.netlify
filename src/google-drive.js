@@ -10,6 +10,50 @@ const GOOGLE_DRIVE_API_URL = "https://www.googleapis.com/drive/v3";
 const GOOGLE_DRIVE_UPLOAD_URL = "https://www.googleapis.com/upload/drive/v3/files";
 const OAUTH_STATE_MAX_AGE_MS = 15 * 60 * 1000;
 
+// SSRF protection: only allow http/https URLs pointing to public IP ranges.
+function validateSourceUrl(url) {
+  let parsed;
+  try {
+    parsed = new URL(url);
+  } catch {
+    const error = new Error("Invalid PDF source URL.");
+    error.code = "invalid_source_url";
+    throw error;
+  }
+
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+    const error = new Error("PDF source URL must use http or https.");
+    error.code = "invalid_source_url";
+    throw error;
+  }
+
+  const hostname = parsed.hostname.toLowerCase();
+
+  // Block localhost variants
+  if (hostname === "localhost" || hostname === "::1") {
+    const error = new Error("PDF source URL must not point to internal infrastructure.");
+    error.code = "ssrf_blocked";
+    throw error;
+  }
+
+  // Block private/link-local IPv4 ranges
+  const ipv4Match = hostname.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+  if (ipv4Match) {
+    const [, a, b, c] = ipv4Match.map(Number);
+    const isPrivate =
+      a === 10 ||
+      a === 127 ||
+      (a === 169 && b === 254) ||
+      (a === 172 && b >= 16 && b <= 31) ||
+      (a === 192 && b === 168);
+    if (isPrivate) {
+      const error = new Error("PDF source URL must not point to internal infrastructure.");
+      error.code = "ssrf_blocked";
+      throw error;
+    }
+  }
+}
+
 function requireGoogleDriveConfig() {
   const config = getConfig();
 
@@ -268,12 +312,28 @@ async function createFolder(accessToken, folderName) {
   });
 }
 
-async function getFreshDriveAccess(link) {
+async function getFreshDriveAccess(link, supabase) {
   const refreshToken = decryptSecret(link.encrypted_refresh_token);
   const tokens = await refreshAccessToken(refreshToken);
+
+  // If Google rotated the refresh token, persist the new one immediately.
+  if (tokens.refresh_token && tokens.refresh_token !== refreshToken && supabase) {
+    const update = await supabase
+      .from("user_google_drive_links")
+      .update({ encrypted_refresh_token: encryptSecret(tokens.refresh_token) })
+      .eq("user_id", link.user_id);
+    if (update.error) {
+      // Log but don't fail the request — the upload can still proceed with the new access token.
+      console.error("Failed to persist rotated Google refresh token", {
+        userId: link.user_id,
+        message: update.error.message,
+      });
+    }
+  }
+
   return {
     accessToken: tokens.access_token,
-    refreshToken,
+    refreshToken: tokens.refresh_token || refreshToken,
   };
 }
 
@@ -352,7 +412,7 @@ export async function ensureGoogleDriveFolderForUser(supabase, userId) {
   }
 
   const config = requireGoogleDriveConfig();
-  const { accessToken } = await getFreshDriveAccess(link);
+  const { accessToken } = await getFreshDriveAccess(link, supabase);
   let folder = null;
 
   if (link.drive_folder_id) {
@@ -555,7 +615,8 @@ export async function uploadPdfToGoogleDriveForUser({
 
   try {
     const folder = await ensureGoogleDriveFolderForUser(supabase, userId);
-    const { accessToken } = await getFreshDriveAccess(link);
+    const { accessToken } = await getFreshDriveAccess(link, supabase);
+    validateSourceUrl(sourceUrl);
     const response = await fetch(sourceUrl, {
       method: "GET",
       redirect: "follow",

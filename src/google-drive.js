@@ -650,6 +650,7 @@ export async function uploadPdfToGoogleDriveForUser({
       method: "GET",
       redirect: "follow",
       headers: {
+        "accept": "application/pdf,application/octet-stream,*/*;q=0.8",
         "user-agent": "RefHubBot/1.0 (+https://refhub.io)",
       },
     });
@@ -665,7 +666,11 @@ export async function uploadPdfToGoogleDriveForUser({
     }
 
     const contentType = response.headers.get("content-type") || "";
-    if (!contentType.toLowerCase().includes("pdf") && !sourceUrl.toLowerCase().includes(".pdf")) {
+    // Accept application/pdf, application/octet-stream (common for binary downloads),
+    // and URLs whose path signals a PDF (/doi/pdf/, /content/pdf/, pdfdirect, .pdf ext).
+    const isPdfContentType = /pdf|octet-stream/i.test(contentType);
+    const isPdfUrl = /\.pdf(\?|$)|\/e?pdf(direct|ft)?[/?]/i.test(sourceUrl);
+    if (!isPdfContentType && !isPdfUrl) {
       throw new Error("RefHub could not confirm that the source URL returned a PDF.");
     }
 

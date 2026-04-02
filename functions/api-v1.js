@@ -97,6 +97,16 @@ const semanticScholarResponseCache = new Map();
 const semanticScholarRateLimitBuckets = new Map();
 
 function toSafeErrorResponse(error, requestId) {
+  if (error?.code === "google_drive_not_configured") {
+    return errorResponse(
+      error.status || 503,
+      error.code,
+      error.message,
+      requestId,
+      error.details,
+    );
+  }
+
   if (error?.code === "invalid_tag_ids") {
     return errorResponse(400, "invalid_tag_ids", error.message, requestId);
   }

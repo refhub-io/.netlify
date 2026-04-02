@@ -56,16 +56,19 @@ function validateSourceUrl(url) {
 
 function requireGoogleDriveConfig() {
   const config = getConfig();
+  const missingEnv = [];
 
-  if (
-    !config.googleDriveClientId ||
-    !config.googleDriveClientSecret ||
-    !config.googleDriveRedirectUri ||
-    !config.googleDriveStateSecret ||
-    !config.googleDriveTokenSecret
-  ) {
+  if (!config.googleDriveClientId) missingEnv.push("GOOGLE_DRIVE_CLIENT_ID");
+  if (!config.googleDriveClientSecret) missingEnv.push("GOOGLE_DRIVE_CLIENT_SECRET");
+  if (!config.googleDriveRedirectUri) missingEnv.push("GOOGLE_DRIVE_REDIRECT_URI");
+  if (!config.googleDriveStateSecret) missingEnv.push("GOOGLE_DRIVE_STATE_SECRET");
+  if (!config.googleDriveTokenSecret) missingEnv.push("GOOGLE_DRIVE_TOKEN_SECRET");
+
+  if (missingEnv.length > 0) {
     const error = new Error("Google Drive integration is not configured on the backend.");
     error.code = "google_drive_not_configured";
+    error.status = 503;
+    error.details = { missing_env: missingEnv };
     throw error;
   }
 

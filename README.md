@@ -71,6 +71,24 @@ The handler dispatches by path segment so the backend can stay small while the c
 
 `REFHUB_API_KEY_PEPPER` is used when hashing presented API keys before comparing them to the stored hash.
 
+## Local environment loading
+
+For local development, this backend loads environment variables from `.env.local` first and then `.env` in the project root before reading `process.env`.
+
+That is mainly useful for Netlify dev and direct local Node runs where the shell has not already exported the backend variables.
+
+## Optional Google Drive environment variables
+
+These are required only when using the Google Drive storage flow:
+
+- `GOOGLE_DRIVE_CLIENT_ID`
+- `GOOGLE_DRIVE_CLIENT_SECRET`
+- `GOOGLE_DRIVE_REDIRECT_URI`
+- `GOOGLE_DRIVE_STATE_SECRET`
+- `GOOGLE_DRIVE_TOKEN_SECRET`
+- `GOOGLE_DRIVE_FOLDER_NAME` optional, defaults to `refhub`
+- `GOOGLE_DRIVE_MAX_UPLOAD_BYTES` optional, defaults to `26214400`
+
 ## API-key model
 
 Keys are expected in one of these headers:

@@ -3,6 +3,7 @@ import {
   authenticateApiKey,
   authenticateManagementUser,
   createApiKeySecret,
+  getSupabaseAdmin,
   hashManagedApiKey,
   isValidApiKeyScope,
   requireScope,
@@ -10,6 +11,14 @@ import {
 } from "../src/auth.js";
 import { getConfig } from "../src/config.js";
 import { serializeVaultExport } from "../src/export.js";
+import {
+  completeGoogleDriveLink,
+  createGoogleDriveAuthorizationUrl,
+  disconnectGoogleDriveForUser,
+  ensureGoogleDriveFolderForUser,
+  getGoogleDriveStatus,
+  uploadPdfToGoogleDriveForUser,
+} from "../src/google-drive.js";
 import {
   createCorsHeaders,
   createRequestContext,
@@ -88,6 +97,16 @@ const semanticScholarResponseCache = new Map();
 const semanticScholarRateLimitBuckets = new Map();
 
 function toSafeErrorResponse(error, requestId) {
+  if (error?.code === "google_drive_not_configured") {
+    return errorResponse(
+      error.status || 503,
+      error.code,
+      error.message,
+      requestId,
+      error.details,
+    );
+  }
+
   if (error?.code === "invalid_tag_ids") {
     return errorResponse(400, "invalid_tag_ids", error.message, requestId);
   }
@@ -300,6 +319,10 @@ function getManagementAuthFailureMessage(code) {
   }
 
   return "Bearer token authentication failed";
+}
+
+function getGoogleDriveCallbackFallbackUrl() {
+  return `${getConfig().appBaseUrl || getConfig().allowedOrigins[0] || "https://refhub.io"}/profile-edit?tab=storage`;
 }
 
 function serializeApiKeyRecord(record) {
@@ -1015,6 +1038,7 @@ async function handleAddItems(supabase, principal, context, vaultId, event) {
   }
 
   const items = parsedBody.value?.items;
+  const storePdfsInGoogleDrive = parsedBody.value?.store_pdfs_in_google_drive === true;
   const { maxBulkItems } = getConfig();
 
   if (!Array.isArray(items) || items.length === 0) {
@@ -1023,6 +1047,15 @@ async function handleAddItems(supabase, principal, context, vaultId, event) {
 
   if (items.length > maxBulkItems) {
     return errorResponse(400, "too_many_items", `Maximum bulk size is ${maxBulkItems}`, context.requestId);
+  }
+
+  if (storePdfsInGoogleDrive && items.length > 1) {
+    return errorResponse(
+      400,
+      "google_drive_bulk_not_supported",
+      "Google Drive PDF storage currently supports single-item saves only.",
+      context.requestId,
+    );
   }
 
   for (const item of items) {
@@ -1095,7 +1128,28 @@ async function handleAddItems(supabase, principal, context, vaultId, event) {
         }
       }
 
-      created.push(vaultPublicationInsert.data);
+      let createdItem = vaultPublicationInsert.data;
+
+      if (storePdfsInGoogleDrive && vaultPublicationInsert.data.pdf_url) {
+        const pdfStorage = await uploadPdfToGoogleDriveForUser({
+          supabase,
+          userId: principal.userId,
+          publicationId: publicationInsert.data.id,
+          vaultPublicationId: vaultPublicationInsert.data.id,
+          title: vaultPublicationInsert.data.title,
+          year: vaultPublicationInsert.data.year,
+          sourceUrl: vaultPublicationInsert.data.pdf_url,
+        });
+
+        // Preserve the original source pdf_url on publications and vault_publications.
+        // The Drive URL is stored in publication_pdf_assets.stored_pdf_url.
+        createdItem = {
+          ...createdItem,
+          pdf_storage: pdfStorage,
+        };
+      }
+
+      created.push(createdItem);
     }
   } catch (error) {
     let rollbackFailed = false;
@@ -1161,6 +1215,115 @@ async function handleAddItems(supabase, principal, context, vaultId, event) {
     meta: {
       request_id: context.requestId,
       vault_id: vaultId,
+    },
+  });
+}
+
+async function handleGetGoogleDriveStatus(supabase, principal, context) {
+  return json(200, {
+    data: await getGoogleDriveStatus(supabase, principal.userId),
+    meta: {
+      request_id: context.requestId,
+    },
+  });
+}
+
+async function handleStartGoogleDriveLink(principal, context, event) {
+  const parsedBody = parseJsonBody(event);
+  if (!parsedBody.ok) {
+    return errorResponse(400, "invalid_json", "Request body must be valid JSON", context.requestId);
+  }
+
+  const { authorizationUrl, returnTo, scope } = createGoogleDriveAuthorizationUrl({
+    userId: principal.userId,
+    returnTo: parsedBody.value?.return_to,
+  });
+
+  return json(200, {
+    data: {
+      authorization_url: authorizationUrl,
+      return_to: returnTo,
+      scope,
+    },
+    meta: {
+      request_id: context.requestId,
+    },
+  });
+}
+
+async function handleEnsureGoogleDriveFolder(supabase, principal, context) {
+  return json(200, {
+    data: await ensureGoogleDriveFolderForUser(supabase, principal.userId),
+    meta: {
+      request_id: context.requestId,
+    },
+  });
+}
+
+async function handleDisconnectGoogleDrive(supabase, principal, context) {
+  return json(200, {
+    data: await disconnectGoogleDriveForUser(supabase, principal.userId),
+    meta: {
+      request_id: context.requestId,
+    },
+  });
+}
+
+async function handleGoogleDriveCallback(_context, event) {
+  const params = event.queryStringParameters || {};
+  const state = params.state || null;
+  const code = params.code || null;
+  const oauthError = params.error || null;
+
+  if (!state) {
+    return text(400, "Missing Google Drive OAuth state.");
+  }
+
+  if (!code && !oauthError) {
+    return text(400, "Missing Google Drive OAuth code.");
+  }
+
+  try {
+    const { redirectUrl } = await completeGoogleDriveLink(getSupabaseAdmin(), {
+      state,
+      code,
+      error: oauthError,
+    });
+
+    return {
+      statusCode: 302,
+      headers: {
+        location: redirectUrl,
+        "cache-control": "no-store",
+      },
+      body: "",
+    };
+  } catch (error) {
+    const redirectUrl = new URL(getGoogleDriveCallbackFallbackUrl());
+    redirectUrl.searchParams.set("gdrive", "error");
+    redirectUrl.searchParams.set("gdrive_message", error.message || "Google Drive linking failed.");
+    return {
+      statusCode: 302,
+      headers: {
+        location: redirectUrl.toString(),
+        "cache-control": "no-store",
+      },
+      body: "",
+    };
+  }
+}
+
+async function handleExtensionGoogleDriveStatus(supabase, principal, context) {
+  const status = await getGoogleDriveStatus(supabase, principal.userId);
+  return json(200, {
+    data: {
+      linked: status.linked,
+      folder_status: status.folderStatus,
+      folder_name: status.folderName,
+      folder_id: status.folderId,
+    },
+    meta: {
+      request_id: context.requestId,
     },
   });
 }
@@ -1311,8 +1474,19 @@ export async function handler(event) {
     }
 
     const route = getRouteSegments(event.path || "/");
+
+    if (route.length === 2 && route[0] === "google-drive" && route[1] === "callback" && event.httpMethod === "GET") {
+      return withCors(await handleGoogleDriveCallback(context, event), corsHeaders);
+    }
+
     const isManagementRoute =
-      route[0] === "keys" || route[0] === "recommendations" || route[0] === "references" || route[0] === "citations" || route[0] === "lookup" || route[0] === "doi-metadata";
+      route[0] === "keys" ||
+      route[0] === "recommendations" ||
+      route[0] === "references" ||
+      route[0] === "citations" ||
+      route[0] === "lookup" ||
+      route[0] === "doi-metadata" ||
+      route[0] === "google-drive";
 
     if (isManagementRoute) {
       const authorization = event.headers?.authorization || event.headers?.Authorization || null;
@@ -1364,6 +1538,14 @@ export async function handler(event) {
         response = await handleRevokeApiKey(supabase, principal, context, route[1]);
       } else if (route.length === 3 && route[0] === "keys" && route[2] === "revoke" && event.httpMethod === "POST") {
         response = await handleRevokeApiKey(supabase, principal, context, route[1]);
+      } else if (route.length === 1 && route[0] === "google-drive" && event.httpMethod === "GET") {
+        response = await handleGetGoogleDriveStatus(supabase, principal, context);
+      } else if (route.length === 2 && route[0] === "google-drive" && route[1] === "connect" && event.httpMethod === "POST") {
+        response = await handleStartGoogleDriveLink(principal, context, event);
+      } else if (route.length === 2 && route[0] === "google-drive" && route[1] === "folder" && event.httpMethod === "POST") {
+        response = await handleEnsureGoogleDriveFolder(supabase, principal, context);
+      } else if (route.length === 1 && route[0] === "google-drive" && event.httpMethod === "DELETE") {
+        response = await handleDisconnectGoogleDrive(supabase, principal, context);
       } else {
         response = errorResponse(404, "route_not_found", "Route not found", context.requestId);
       }
@@ -1391,6 +1573,8 @@ export async function handler(event) {
         response = await handleUpdateItem(supabase, principal, context, route[1], route[3], event);
       } else if (route.length === 3 && route[0] === "vaults" && route[2] === "export" && event.httpMethod === "GET") {
         response = await handleExportVault(supabase, principal, context, route[1], event);
+      } else if (route.length === 2 && route[0] === "extension" && route[1] === "google-drive-status" && event.httpMethod === "GET") {
+        response = await handleExtensionGoogleDriveStatus(supabase, principal, context);
       } else {
         response = errorResponse(404, "route_not_found", "Route not found", context.requestId);
       }

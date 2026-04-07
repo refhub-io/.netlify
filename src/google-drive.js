@@ -581,12 +581,18 @@ function buildPdfName(title, year) {
 
 async function fetchPdfBufferForDrive(url, via, maxBytes, sourceUrl, requestHeaders = {}) {
   console.log("[drive] fetching PDF server-side", { fetchUrl: url, via });
+  // Use a browser-like User-Agent when forwarding session headers (cookies/referer).
+  // Some CDNs (e.g. ScienceDirect S3 presigned URLs) return an HTML gate page
+  // to bot-identified User-Agents regardless of the auth token in the URL.
+  const userAgent = Object.keys(requestHeaders).length > 0
+    ? "Mozilla/5.0 (compatible; RefHub/1.0; +https://refhub.io)"
+    : "RefHubBot/1.0 (+https://refhub.io)";
   const response = await fetch(url, {
     method: "GET",
     redirect: "follow",
     headers: {
       "accept": "application/pdf,application/octet-stream,*/*;q=0.8",
-      "user-agent": "RefHubBot/1.0 (+https://refhub.io)",
+      "user-agent": userAgent,
       ...requestHeaders,
     },
   });
@@ -912,12 +918,17 @@ export async function uploadPdfToGoogleDriveForUser({
       const { url: fetchUrl, via } = await resolveOpenAccessPdfUrl(doi, sourceUrl);
       resolvedSourceUrl = fetchUrl;
       validateSourceUrl(fetchUrl);
+      // Always forward session headers on the first attempt.  Some CDNs
+      // (e.g. ScienceDirect S3 presigned URLs) serve an HTML gate page to
+      // requests without the originating Referer / cookies even though the
+      // AWS signature is present.  Sending them upfront avoids a wasted
+      // round-trip and makes the retry path only needed for Unpaywall fallbacks.
+      const sourceHeaders = buildSourceRequestHeaders(cookieHeader, referer);
       try {
-        pdfBuffer = await fetchPdfBufferForDrive(fetchUrl, via, config.googleDriveMaxUploadBytes, sourceUrl);
+        pdfBuffer = await fetchPdfBufferForDrive(fetchUrl, via, config.googleDriveMaxUploadBytes, sourceUrl, sourceHeaders);
       } catch (error) {
         if (sourceUrl && sourceUrl !== fetchUrl) {
-          const sourceHeaders = buildSourceRequestHeaders(cookieHeader, referer);
-          console.log("[drive] source fetch retry", {
+          console.log("[drive] source fetch retry after unpaywall failure", {
             sourceUrl,
             message: error.message,
             hasCookieHeader: Boolean(cookieHeader),
@@ -927,7 +938,7 @@ export async function uploadPdfToGoogleDriveForUser({
           resolvedSourceUrl = sourceUrl;
           pdfBuffer = await fetchPdfBufferForDrive(
             sourceUrl,
-            via === "unpaywall" ? "source-after-unpaywall" : "source-retry",
+            "source-after-unpaywall",
             config.googleDriveMaxUploadBytes,
             sourceUrl,
             sourceHeaders,
@@ -991,4 +1002,84 @@ export async function uploadPdfToGoogleDriveForUser({
       message: error.message,
     };
   }
+}
+
+/**
+ * Creates a Google Drive resumable upload session and returns the upload URL.
+ * The caller (browser extension) will PUT the PDF bytes directly to that URL,
+ * bypassing Netlify entirely — no body size limit, no IP-based CDN blocking.
+ */
+export async function createDriveResumableSession(supabase, userId, { title, year }) {
+  const link = await getStoredLink(supabase, userId);
+  if (!link) {
+    return null;
+  }
+
+  const { accessToken } = await getFreshDriveAccess(link, supabase);
+  const folder = await ensureGoogleDriveFolderForUser(supabase, userId);
+  const filename = buildPdfName(title, year);
+
+  const response = await fetch(
+    `${GOOGLE_DRIVE_UPLOAD_URL}?uploadType=resumable&fields=id,name,webViewLink,webContentLink`,
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        "Content-Type": "application/json",
+        "X-Upload-Content-Type": "application/pdf",
+      },
+      body: JSON.stringify({
+        name: filename,
+        mimeType: "application/pdf",
+        parents: [folder.folderId],
+      }),
+    },
+  );
+
+  if (!response.ok) {
+    const err = new Error(`Drive resumable session creation failed (${response.status}).`);
+    err.code = "drive_session_failed";
+    throw err;
+  }
+
+  const uploadUrl = response.headers.get("location");
+  if (!uploadUrl) {
+    throw new Error("Drive did not return an upload URL.");
+  }
+
+  return { upload_url: uploadUrl, file_name: filename };
+}
+
+/**
+ * Records a browser-completed Drive upload in the database.
+ * Called after the extension has PUT the bytes directly to the Drive upload URL.
+ */
+export async function recordBrowserDriveUpload(supabase, {
+  userId,
+  publicationId,
+  vaultPublicationId,
+  fileId,
+  webViewLink,
+  sourceUrl,
+}) {
+  await upsertPdfAssetRecord(supabase, {
+    user_id: userId,
+    publication_id: publicationId,
+    vault_publication_id: vaultPublicationId,
+    storage_provider: "google_drive",
+    source_pdf_url: sourceUrl || null,
+    stored_pdf_url: webViewLink || null,
+    stored_file_id: fileId,
+    status: "stored",
+    error_message: null,
+  });
+
+  return {
+    attempted: true,
+    stored: true,
+    provider: "google_drive",
+    fileId,
+    pdfUrl: webViewLink || null,
+    sourceUrl: sourceUrl || null,
+  };
 }

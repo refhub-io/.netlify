@@ -13,12 +13,14 @@ import { getConfig } from "../src/config.js";
 import { serializeVaultExport } from "../src/export.js";
 import {
   completeGoogleDriveLink,
+  createDriveResumableSession,
   createGoogleDriveAuthorizationUrl,
   disconnectGoogleDriveForUser,
   ensureGoogleDriveFolderForUser,
   extractPdfMetadataFromBuffer,
   fetchPdfSourceBuffer,
   getGoogleDriveStatus,
+  recordBrowserDriveUpload,
   uploadPdfToGoogleDriveForUser,
 } from "../src/google-drive.js";
 import {
@@ -1349,6 +1351,82 @@ async function handleUploadItemPdf(supabase, principal, context, event, vaultId,
   });
 }
 
+async function handleCreatePdfDriveSession(supabase, principal, context, vaultId, itemId) {
+  if (!requireScope(principal, API_SCOPES.WRITE)) {
+    return errorResponse(403, "missing_scope", "Scope vaults:write is required", context.requestId);
+  }
+
+  const access = await resolveVaultAccess(supabase, principal, vaultId, "editor");
+  if (!access.ok) {
+    return errorResponse(access.status, access.code, "Vault write access denied", context.requestId);
+  }
+
+  const { data: vaultPub, error: vpError } = await supabase
+    .from("vault_publications")
+    .select("id, title, year")
+    .eq("id", itemId)
+    .eq("vault_id", vaultId)
+    .single();
+
+  if (vpError || !vaultPub) {
+    return errorResponse(404, "item_not_found", "Vault item not found", context.requestId);
+  }
+
+  const session = await createDriveResumableSession(supabase, principal.userId, {
+    title: vaultPub.title,
+    year: vaultPub.year,
+  });
+
+  if (!session) {
+    return errorResponse(503, "drive_not_linked", "Google Drive is not linked for this account", context.requestId);
+  }
+
+  return json(200, { data: session, meta: { request_id: context.requestId } });
+}
+
+async function handleCompletePdfDriveUpload(supabase, principal, context, event, vaultId, itemId) {
+  if (!requireScope(principal, API_SCOPES.WRITE)) {
+    return errorResponse(403, "missing_scope", "Scope vaults:write is required", context.requestId);
+  }
+
+  const access = await resolveVaultAccess(supabase, principal, vaultId, "editor");
+  if (!access.ok) {
+    return errorResponse(access.status, access.code, "Vault write access denied", context.requestId);
+  }
+
+  const { data: vaultPub, error: vpError } = await supabase
+    .from("vault_publications")
+    .select("id, original_publication_id")
+    .eq("id", itemId)
+    .eq("vault_id", vaultId)
+    .single();
+
+  if (vpError || !vaultPub) {
+    return errorResponse(404, "item_not_found", "Vault item not found", context.requestId);
+  }
+
+  const parsedBody = parseJsonBody(event);
+  if (!parsedBody.ok) {
+    return errorResponse(400, "invalid_json", "Request body must be valid JSON", context.requestId);
+  }
+
+  const { file_id, web_view_link, source_url } = parsedBody.value || {};
+  if (!file_id) {
+    return errorResponse(400, "missing_file_id", "Body must include file_id", context.requestId);
+  }
+
+  const result = await recordBrowserDriveUpload(supabase, {
+    userId: principal.userId,
+    publicationId: vaultPub.original_publication_id,
+    vaultPublicationId: vaultPub.id,
+    fileId: file_id,
+    webViewLink: web_view_link || null,
+    sourceUrl: source_url || null,
+  });
+
+  return json(200, { data: result, meta: { request_id: context.requestId } });
+}
+
 async function handleGetGoogleDriveStatus(supabase, principal, context) {
   return json(200, {
     data: await getGoogleDriveStatus(supabase, principal.userId),
@@ -1704,6 +1782,10 @@ export async function handler(event) {
         response = await handleAddItems(supabase, principal, context, route[1], event);
       } else if (route.length === 5 && route[0] === "vaults" && route[2] === "items" && route[4] === "pdf" && event.httpMethod === "POST") {
         response = await handleUploadItemPdf(supabase, principal, context, event, route[1], route[3]);
+      } else if (route.length === 6 && route[0] === "vaults" && route[2] === "items" && route[4] === "pdf" && route[5] === "session" && event.httpMethod === "POST") {
+        response = await handleCreatePdfDriveSession(supabase, principal, context, route[1], route[3]);
+      } else if (route.length === 6 && route[0] === "vaults" && route[2] === "items" && route[4] === "pdf" && route[5] === "complete" && event.httpMethod === "POST") {
+        response = await handleCompletePdfDriveUpload(supabase, principal, context, event, route[1], route[3]);
       } else if (route.length === 4 && route[0] === "vaults" && route[2] === "items" && event.httpMethod === "PATCH") {
         response = await handleUpdateItem(supabase, principal, context, route[1], route[3], event);
       } else if (route.length === 3 && route[0] === "vaults" && route[2] === "export" && event.httpMethod === "GET") {

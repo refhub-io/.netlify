@@ -16,6 +16,8 @@ import {
   createGoogleDriveAuthorizationUrl,
   disconnectGoogleDriveForUser,
   ensureGoogleDriveFolderForUser,
+  extractPdfMetadataFromBuffer,
+  fetchPdfSourceBuffer,
   getGoogleDriveStatus,
   uploadPdfToGoogleDriveForUser,
 } from "../src/google-drive.js";
@@ -708,6 +710,18 @@ async function handlePaperLookup(context, event, principal) {
   });
 }
 async function handleSemanticScholarDoiMetadataRoute(context, event, principal) {
+  if (!requireScope(principal, API_SCOPES.READ)) {
+    return errorResponse(403, "missing_scope", "Scope vaults:read is required", context.requestId);
+  }
+
+  // Semantic Scholar is disabled when no API key is configured. Without a key
+  // the unauthenticated rate limit (1 req/s shared) is hit almost immediately.
+  // Set SEMANTIC_SCHOLAR_API_KEY in the environment to re-enable this route.
+  const { semanticScholarApiKey } = getConfig();
+  if (!semanticScholarApiKey) {
+    return errorResponse(503, "semantic_scholar_disabled", "Semantic Scholar metadata enrichment is not configured on this server.", context.requestId);
+  }
+
   const parsedBody = parseJsonBody(event);
   if (!parsedBody.ok) {
     return errorResponse(400, "invalid_json", "Request body must be valid JSON", context.requestId);
@@ -746,7 +760,6 @@ async function handleSemanticScholarDoiMetadataRoute(context, event, principal) 
         );
       }
 
-      const { semanticScholarApiKey } = getConfig();
       const timeout = AbortSignal.timeout(8000);
       return getCachedSemanticScholarResponse(cacheKey, () =>
         fetchSemanticScholarDoiMetadata({
@@ -766,6 +779,60 @@ async function handleSemanticScholarDoiMetadataRoute(context, event, principal) 
     meta: {
       request_id: context.requestId,
       doi,
+    },
+  });
+}
+
+async function handlePdfMetadataRoute(context, event, principal) {
+  if (!requireScope(principal, API_SCOPES.READ)) {
+    return errorResponse(403, "missing_scope", "Scope vaults:read is required", context.requestId);
+  }
+
+  const parsedBody = parseJsonBody(event);
+  if (!parsedBody.ok) {
+    return errorResponse(400, "invalid_json", "Request body must be valid JSON", context.requestId);
+  }
+
+  const sourceUrl = typeof parsedBody.value?.source_url === "string" ? parsedBody.value.source_url.trim() : "";
+  const cookieHeader = typeof parsedBody.value?.cookie_header === "string" ? parsedBody.value.cookie_header.trim() : "";
+  const referer = typeof parsedBody.value?.referer === "string" ? parsedBody.value.referer.trim() : "";
+  if (!sourceUrl) {
+    return errorResponse(400, "invalid_source_url", "Body must include a non-empty source_url", context.requestId);
+  }
+
+  let pdfBuffer;
+  try {
+    pdfBuffer = await fetchPdfSourceBuffer({
+      sourceUrl,
+      cookieHeader,
+      referer,
+      maxBytes: 10 * 1024 * 1024,
+    });
+  } catch (fetchErr) {
+    // PDF not accessible from the server (e.g. institutional IP auth, 403, etc.).
+    // Return empty metadata with a note rather than letting this throw a 500 —
+    // the extension already handles null/empty metadata gracefully.
+    console.log("[pdf-metadata] PDF fetch failed, returning empty metadata", { sourceUrl, message: fetchErr.message });
+    return json(200, {
+      data: { doi: null, title: null, authors: [], year: null, journal: null, text_excerpt: "" },
+      meta: { request_id: context.requestId, source_url: sourceUrl, fetch_skipped: true, fetch_error: fetchErr.message },
+    });
+  }
+
+  const metadata = await extractPdfMetadataFromBuffer(pdfBuffer);
+
+  return json(200, {
+    data: {
+      doi: metadata.doi || null,
+      title: metadata.title || null,
+      authors: metadata.authors || [],
+      year: metadata.year || null,
+      journal: metadata.journal || null,
+      text_excerpt: metadata.firstPageText ? metadata.firstPageText.slice(0, 2000) : "",
+    },
+    meta: {
+      request_id: context.requestId,
+      source_url: sourceUrl,
     },
   });
 }
@@ -1198,20 +1265,6 @@ async function handleUploadItemPdf(supabase, principal, context, event, vaultId,
     return errorResponse(access.status, access.code, "Vault write access denied", context.requestId);
   }
 
-  if (!event.body) {
-    return errorResponse(400, "missing_body", "Request body must be a PDF binary", context.requestId);
-  }
-
-  // Netlify base64-encodes binary request bodies
-  const pdfBuffer = event.isBase64Encoded
-    ? Buffer.from(event.body, "base64")
-    : Buffer.from(event.body, "binary");
-
-  // Validate PDF magic bytes (%PDF-)
-  if (pdfBuffer.length < 5 || pdfBuffer[0] !== 0x25 || pdfBuffer[1] !== 0x50 || pdfBuffer[2] !== 0x44 || pdfBuffer[3] !== 0x46) {
-    return errorResponse(400, "invalid_pdf", "Request body does not appear to be a valid PDF", context.requestId);
-  }
-
   const { data: vaultPub, error: vpError } = await supabase
     .from("vault_publications")
     .select("id, original_publication_id, title, year, doi")
@@ -1223,7 +1276,49 @@ async function handleUploadItemPdf(supabase, principal, context, event, vaultId,
     return errorResponse(404, "item_not_found", "Vault item not found", context.requestId);
   }
 
-  console.log("[pdf-upload] received PDF for vault_pub", { itemId, vaultId, bytes: pdfBuffer.length });
+  const contentType = event.headers?.["content-type"] || event.headers?.["Content-Type"] || "";
+  let pdfBuffer = null;
+  let sourceUrl = null;
+  let cookieHeader = null;
+  let referer = null;
+
+  if (/application\/json/i.test(contentType)) {
+    const parsedBody = parseJsonBody(event);
+    if (!parsedBody.ok) {
+      return errorResponse(400, "invalid_json", "Request body must be valid JSON", context.requestId);
+    }
+
+    sourceUrl = typeof parsedBody.value?.source_url === "string" ? parsedBody.value.source_url.trim() : "";
+    cookieHeader = typeof parsedBody.value?.cookie_header === "string" ? parsedBody.value.cookie_header.trim() : "";
+    referer = typeof parsedBody.value?.referer === "string" ? parsedBody.value.referer.trim() : "";
+    if (!sourceUrl) {
+      return errorResponse(400, "invalid_source_url", "Body must include a non-empty source_url", context.requestId);
+    }
+
+    console.log("[pdf-upload] received source-url PDF request for vault_pub", {
+      itemId,
+      vaultId,
+      sourceUrl,
+      hasCookieHeader: Boolean(cookieHeader),
+      referer,
+    });
+  } else {
+    if (!event.body) {
+      return errorResponse(400, "missing_body", "Request body must be a PDF binary or JSON source_url", context.requestId);
+    }
+
+    // Netlify base64-encodes binary request bodies
+    pdfBuffer = event.isBase64Encoded
+      ? Buffer.from(event.body, "base64")
+      : Buffer.from(event.body, "binary");
+
+    // Validate PDF magic bytes (%PDF-)
+    if (pdfBuffer.length < 5 || pdfBuffer[0] !== 0x25 || pdfBuffer[1] !== 0x50 || pdfBuffer[2] !== 0x44 || pdfBuffer[3] !== 0x46) {
+      return errorResponse(400, "invalid_pdf", "Request body does not appear to be a valid PDF", context.requestId);
+    }
+
+    console.log("[pdf-upload] received PDF for vault_pub", { itemId, vaultId, bytes: pdfBuffer.length });
+  }
 
   const result = await uploadPdfToGoogleDriveForUser({
     supabase,
@@ -1233,7 +1328,9 @@ async function handleUploadItemPdf(supabase, principal, context, event, vaultId,
     title: vaultPub.title,
     year: vaultPub.year,
     doi: vaultPub.doi,
-    sourceUrl: null,
+    sourceUrl,
+    cookieHeader,
+    referer,
     pdfBuffer,
   });
 
@@ -1518,7 +1615,6 @@ export async function handler(event) {
       route[0] === "references" ||
       route[0] === "citations" ||
       route[0] === "lookup" ||
-      route[0] === "doi-metadata" ||
       route[0] === "google-drive";
 
     if (isManagementRoute) {
@@ -1600,6 +1696,10 @@ export async function handler(event) {
         response = await handleListVaults(supabase, principal, context);
       } else if (route.length === 2 && route[0] === "vaults" && event.httpMethod === "GET") {
         response = await handleReadVault(supabase, principal, context, route[1]);
+      } else if (route.length === 1 && route[0] === "doi-metadata" && event.httpMethod === "POST") {
+        response = await handleSemanticScholarDoiMetadataRoute(context, event, principal);
+      } else if (route.length === 1 && route[0] === "pdf-metadata" && event.httpMethod === "POST") {
+        response = await handlePdfMetadataRoute(context, event, principal);
       } else if (route.length === 3 && route[0] === "vaults" && route[2] === "items" && event.httpMethod === "POST") {
         response = await handleAddItems(supabase, principal, context, route[1], event);
       } else if (route.length === 5 && route[0] === "vaults" && route[2] === "items" && route[4] === "pdf" && event.httpMethod === "POST") {

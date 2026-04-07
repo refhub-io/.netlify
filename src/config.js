@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 
 const DEFAULT_MAX_BULK_ITEMS = 50;
-const DEFAULT_MAX_BODY_BYTES = 262144;
+const DEFAULT_MAX_BODY_BYTES = 50 * 1024 * 1024;
 const DEFAULT_ALLOWED_ORIGINS = ["https://refhub.io", "http://localhost:3000"];
 const LOCAL_ENV_FILES = [".env.local", ".env"];
 

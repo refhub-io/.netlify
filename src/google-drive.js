@@ -579,6 +579,214 @@ function buildPdfName(title, year) {
   return `${base || "refhub-paper"}.pdf`;
 }
 
+async function fetchPdfBufferForDrive(url, via, maxBytes, sourceUrl, requestHeaders = {}) {
+  console.log("[drive] fetching PDF server-side", { fetchUrl: url, via });
+  const response = await fetch(url, {
+    method: "GET",
+    redirect: "follow",
+    headers: {
+      "accept": "application/pdf,application/octet-stream,*/*;q=0.8",
+      "user-agent": "RefHubBot/1.0 (+https://refhub.io)",
+      ...requestHeaders,
+    },
+  });
+
+  const contentType = response.headers.get("content-type") || "";
+  const contentLength = response.headers.get("content-length") || "unknown";
+  console.log("[drive] PDF fetch response", { status: response.status, contentType, contentLength, finalUrl: response.url, via });
+
+  if (!response.ok) {
+    throw new Error(`Failed to fetch PDF source (${response.status})${via === "unpaywall" ? " via Unpaywall" : ""}.`);
+  }
+
+  if (Number(contentLength) && Number(contentLength) > maxBytes) {
+    throw new Error(`PDF exceeds upload limit (${maxBytes} bytes).`);
+  }
+
+  const isPdfContentType = /pdf|octet-stream/i.test(contentType);
+  const isPdfUrl = /\.pdf(\?|$)|\/e?pdf(direct|ft)?[/?]/i.test(sourceUrl || url);
+  if (/text\/html/i.test(contentType)) {
+    const html = await response.text();
+    const resolvedPdfUrl = resolvePdfUrlFromHtml(html, response.url || url);
+    if (resolvedPdfUrl && resolvedPdfUrl !== url) {
+      console.log("[drive] resolved PDF from HTML wrapper", { wrapperUrl: url, resolvedPdfUrl });
+      return fetchPdfBufferForDrive(resolvedPdfUrl, `${via}:resolved-wrapper`, maxBytes, resolvedPdfUrl, requestHeaders);
+    }
+    throw new Error("RefHub could not confirm that the source URL returned a PDF.");
+  }
+
+  if (!isPdfContentType && !isPdfUrl) {
+    throw new Error("RefHub could not confirm that the source URL returned a PDF.");
+  }
+
+  const pdfBuffer = Buffer.from(await response.arrayBuffer());
+  console.log("[drive] PDF buffered", { bytes: pdfBuffer.length });
+  return pdfBuffer;
+}
+
+function buildSourceRequestHeaders(cookieHeader, referer) {
+  return {
+    ...(cookieHeader ? { cookie: cookieHeader } : {}),
+    ...(referer ? { referer } : {}),
+  };
+}
+
+function resolvePdfUrlFromHtml(html, baseUrl) {
+  const patterns = [
+    /<iframe[^>]+src=["']([^"'#?]+\.pdf(?:\?[^"']*)?)["']/i,
+    /<(?:embed|object)[^>]+(?:src|data)=["']([^"'#?]+\.pdf(?:\?[^"']*)?)["']/i,
+    /["'](https?:\/\/[^"'#?]+\.pdf(?:\?[^"']*)?)["']/i,
+    /["'](\/[^"'#?]+\.pdf(?:\?[^"']*)?)["']/i,
+  ];
+
+  for (const pattern of patterns) {
+    const match = html.match(pattern);
+    if (!match?.[1]) {
+      continue;
+    }
+
+    try {
+      return new URL(match[1], baseUrl).toString();
+    } catch {
+      continue;
+    }
+  }
+
+  return "";
+}
+
+
+function extractDoiFromText(text) {
+  const str = String(text || "");
+  // Prefer the explicit "Digital Object Identifier" label which is the paper's own DOI
+  const explicit = str.match(/digital\s+object\s+identifier\s+(10\.\d{4,9}\/[-._;()/:A-Z0-9]+)/i);
+  if (explicit) return explicit[1].replace(/[)>.,;]+$/, "").toLowerCase();
+  // DOI: label
+  const doiLabel = str.match(/\bDOI:\s*(10\.\d{4,9}\/[-._;()/:A-Z0-9]+)/i);
+  if (doiLabel) return doiLabel[1].replace(/[)>.,;]+$/, "").toLowerCase();
+  // Fallback: first match anywhere
+  const match = str.match(/\b10\.\d{4,9}\/[-._;()/:A-Z0-9]+\b/i);
+  return match ? match[0].replace(/[)>.,;]+$/, "").toLowerCase() : "";
+}
+
+function guessTitleFromPdfText(text) {
+  const lines = String(text || "")
+    .split(/\r?\n/)
+    .map((line) => line.replace(/\s+/g, " ").trim())
+    .filter(Boolean)
+    .filter((line) =>
+      !/^(abstract|index terms|keywords)\b/i.test(line) &&
+      !/(authorized licensed use limited to|personal use is permitted|ieee xplore|digital object identifier|doi:|©|\bcopyright\b)/i.test(line) &&
+      !/^(?:\d+\s+)?(?:IEEE|ACM)\s+(?:TRANSACTIONS|JOURNAL|LETTERS|ACCESS|MAGAZINE|SENSORS)/i.test(line) &&
+      !/^(?:vol\.|proceedings|proc\.)\b/i.test(line)
+    )
+    .slice(0, 12);
+
+  const candidates = lines.filter((line) => line.length >= 20 && line.length <= 250);
+  candidates.sort((left, right) => right.length - left.length);
+  return candidates[0] || "";
+}
+
+function extractAuthorsFromText(text) {
+  const lines = String(text || "")
+    .split(/\r?\n/)
+    .map((l) => l.replace(/\s+/g, " ").trim())
+    .filter(Boolean);
+
+  const abstractIdx = lines.findIndex((l) => /^abstract[—–\-:]/i.test(l));
+  const searchLines = abstractIdx > 0 ? lines.slice(0, abstractIdx) : lines.slice(0, 20);
+
+  for (const line of searchLines) {
+    if (line.length < 5 || line.length > 300) continue;
+    if (/\b(abstract|introduction|keywords|index|vol\.|ieee|acm|transactions|journal|conference|copyright|received|accepted|doi:|©)\b/i.test(line)) continue;
+    if (/^\d/.test(line)) continue;
+
+    const normalized = line.replace(/,?\s+and\s+/gi, ", ");
+    const parts = normalized.split(/,\s+/).map((p) => p.trim()).filter(Boolean);
+    // Each part should look like a proper name: 1–4 capitalized words (with optional periods for initials)
+    const nameRegex = /^[A-Z][a-zÀ-ÖØ-öø-ÿ]+(\s+[A-Z][a-zÀ-ÖØ-öø-ÿ.]+){0,3}$/;
+    if (parts.length >= 2 && parts.every((p) => nameRegex.test(p))) {
+      return parts;
+    }
+  }
+
+  return [];
+}
+
+function extractYearFromText(text) {
+  const str = String(text || "");
+  // Year embedded in DOI (e.g. 10.1109/TVCG.2024.3514858)
+  const doi = extractDoiFromText(str);
+  if (doi) {
+    const doiYear = doi.match(/\.(20\d{2}|19\d{2})\./);
+    if (doiYear) return parseInt(doiYear[1], 10);
+  }
+  // Journal header: "VOL. X, NO. X, MONTH YEAR"
+  const volMatch = str.match(/VOL\.\s*\d+[^)]*?(20\d{2}|19\d{2})/i);
+  if (volMatch) return parseInt(volMatch[1], 10);
+  // "MONTH YEAR" in first few lines
+  const monthYear = str.match(/\b(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+(20\d{2}|19\d{2})\b/i);
+  if (monthYear) return parseInt(monthYear[1], 10);
+  // Copyright line
+  const copyright = str.match(/©\s*(20\d{2}|19\d{2})/);
+  if (copyright) return parseInt(copyright[1], 10);
+  return null;
+}
+
+function extractJournalFromText(text) {
+  const lines = String(text || "").split(/\r?\n/).map((l) => l.replace(/\s+/g, " ").trim()).filter(Boolean);
+
+  for (const line of lines.slice(0, 8)) {
+    // Strip leading page number (e.g. "1932 IEEE TRANSACTIONS...")
+    const stripped = line.replace(/^\d+\s+/, "");
+    if (/^(?:IEEE|ACM)\s+(?:TRANSACTIONS|JOURNAL|LETTERS|ACCESS|MAGAZINE|SENSORS)/i.test(stripped)) {
+      return stripped.replace(/,?\s+VOL\..*$/i, "").trim();
+    }
+    if (/^(?:PROCEEDINGS|PROC\.)\s+OF\b/i.test(line)) {
+      return line.replace(/,?\s*\d{4}.*$/, "").trim();
+    }
+  }
+
+  return "";
+}
+
+export async function extractPdfMetadataFromBuffer(pdfBuffer) {
+  // Lazy dynamic import: esbuild compiles this function as CJS, so a module-level
+  // import of the CJS pdf-parse package fails (import.meta.url is undefined at
+  // module evaluation time). A dynamic import() inside an async function is safe —
+  // esbuild transforms it to Promise.resolve(require("pdf-parse")) in CJS output,
+  // and pdf-parse is external so it resolves from node_modules at runtime.
+  let text = "";
+  try {
+    const mod = await import("pdf-parse");
+    const pdfParse = mod.default ?? mod;
+    const data = await pdfParse(pdfBuffer, { max: 1 });
+    text = data.text || "";
+  } catch {
+    // Malformed, encrypted, or parsing unavailable — return what we can.
+  }
+
+  return {
+    doi: extractDoiFromText(text),
+    title: guessTitleFromPdfText(text),
+    authors: extractAuthorsFromText(text),
+    year: extractYearFromText(text),
+    journal: extractJournalFromText(text),
+    firstPageText: text,
+  };
+}
+
+export async function fetchPdfSourceBuffer({ sourceUrl, cookieHeader, referer, maxBytes }) {
+  validateSourceUrl(sourceUrl);
+  return fetchPdfBufferForDrive(
+    sourceUrl,
+    "source",
+    maxBytes || getConfig().googleDriveMaxUploadBytes,
+    sourceUrl,
+    buildSourceRequestHeaders(cookieHeader, referer),
+  );
+}
+
 async function uploadDriveFile(accessToken, folderId, filename, pdfBuffer) {
   const boundary = `refhub-${crypto.randomBytes(12).toString("hex")}`;
   const metadata = JSON.stringify({
@@ -661,6 +869,8 @@ export async function uploadPdfToGoogleDriveForUser({
   year,
   doi,
   sourceUrl,
+  cookieHeader,
+  referer,
   pdfBuffer: suppliedBuffer,
 }) {
   const link = await getStoredLink(supabase, userId);
@@ -674,7 +884,16 @@ export async function uploadPdfToGoogleDriveForUser({
     };
   }
 
-  console.log("[drive] upload attempt", { userId, doi, sourceUrl, title, year, clientSupplied: Boolean(suppliedBuffer) });
+  console.log("[drive] upload attempt", {
+    userId,
+    doi,
+    sourceUrl,
+    title,
+    year,
+    clientSupplied: Boolean(suppliedBuffer),
+    hasCookieHeader: Boolean(cookieHeader),
+    referer,
+  });
 
   try {
     const folder = await ensureGoogleDriveFolderForUser(supabase, userId);
@@ -683,6 +902,7 @@ export async function uploadPdfToGoogleDriveForUser({
     const { accessToken } = await getFreshDriveAccess(link, supabase);
     const config = requireGoogleDriveConfig();
 
+    let resolvedSourceUrl = sourceUrl;
     let pdfBuffer;
     if (suppliedBuffer) {
       // Extension fetched the PDF using the user's browser session (institutional access)
@@ -690,38 +910,32 @@ export async function uploadPdfToGoogleDriveForUser({
       console.log("[drive] using client-supplied PDF buffer", { bytes: pdfBuffer.length });
     } else {
       const { url: fetchUrl, via } = await resolveOpenAccessPdfUrl(doi, sourceUrl);
+      resolvedSourceUrl = fetchUrl;
       validateSourceUrl(fetchUrl);
-
-      console.log("[drive] fetching PDF server-side", { fetchUrl, via });
-      const response = await fetch(fetchUrl, {
-        method: "GET",
-        redirect: "follow",
-        headers: {
-          "accept": "application/pdf,application/octet-stream,*/*;q=0.8",
-          "user-agent": "RefHubBot/1.0 (+https://refhub.io)",
-        },
-      });
-
-      const contentType = response.headers.get("content-type") || "";
-      const contentLength = response.headers.get("content-length") || "unknown";
-      console.log("[drive] PDF fetch response", { status: response.status, contentType, contentLength, finalUrl: response.url, via });
-
-      if (!response.ok) {
-        throw new Error(`Failed to fetch PDF source (${response.status})${via === "unpaywall" ? " via Unpaywall" : ""}.`);
+      try {
+        pdfBuffer = await fetchPdfBufferForDrive(fetchUrl, via, config.googleDriveMaxUploadBytes, sourceUrl);
+      } catch (error) {
+        if (sourceUrl && sourceUrl !== fetchUrl) {
+          const sourceHeaders = buildSourceRequestHeaders(cookieHeader, referer);
+          console.log("[drive] source fetch retry", {
+            sourceUrl,
+            message: error.message,
+            hasCookieHeader: Boolean(cookieHeader),
+            referer,
+          });
+          validateSourceUrl(sourceUrl);
+          resolvedSourceUrl = sourceUrl;
+          pdfBuffer = await fetchPdfBufferForDrive(
+            sourceUrl,
+            via === "unpaywall" ? "source-after-unpaywall" : "source-retry",
+            config.googleDriveMaxUploadBytes,
+            sourceUrl,
+            sourceHeaders,
+          );
+        } else {
+          throw error;
+        }
       }
-
-      if (Number(contentLength) && Number(contentLength) > config.googleDriveMaxUploadBytes) {
-        throw new Error(`PDF exceeds upload limit (${config.googleDriveMaxUploadBytes} bytes).`);
-      }
-
-      const isPdfContentType = /pdf|octet-stream/i.test(contentType);
-      const isPdfUrl = /\.pdf(\?|$)|\/e?pdf(direct|ft)?[/?]/i.test(sourceUrl);
-      if (!isPdfContentType && !isPdfUrl) {
-        throw new Error("RefHub could not confirm that the source URL returned a PDF.");
-      }
-
-      pdfBuffer = Buffer.from(await response.arrayBuffer());
-      console.log("[drive] PDF buffered", { bytes: pdfBuffer.length });
     }
 
     if (pdfBuffer.length > config.googleDriveMaxUploadBytes) {
@@ -737,7 +951,7 @@ export async function uploadPdfToGoogleDriveForUser({
       publication_id: publicationId,
       vault_publication_id: vaultPublicationId,
       storage_provider: "google_drive",
-      source_pdf_url: fetchUrl,
+      source_pdf_url: resolvedSourceUrl,
       stored_pdf_url: uploaded.webViewLink || uploaded.webContentLink || null,
       stored_file_id: uploaded.id,
       status: "stored",
@@ -752,7 +966,7 @@ export async function uploadPdfToGoogleDriveForUser({
       folderId: folder.folderId,
       folderName: folder.folderName,
       pdfUrl: uploaded.webViewLink || uploaded.webContentLink || null,
-      sourceUrl,
+      sourceUrl: resolvedSourceUrl,
     };
   } catch (error) {
     console.error("[drive] upload failed", { userId, sourceUrl, code: error.code, message: error.message });

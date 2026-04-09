@@ -437,6 +437,7 @@ The existing `update_vaults_updated_at` DB trigger (`BEFORE UPDATE ON vaults`) f
 | Item soft-delete / restore | Hard delete is sufficient; revision table would need new schema |
 | Item revision history | No history table in current schema |
 | Audit log viewer in frontend | Tracked as TODO above — frontend update cycle |
+| Update `docs/API_USAGE.md` and `README.md` | Do after implementation, together with RefHub skill update |
 
 ---
 

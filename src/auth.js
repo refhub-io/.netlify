@@ -9,6 +9,7 @@ export const API_SCOPES = {
   READ: "vaults:read",
   WRITE: "vaults:write",
   EXPORT: "vaults:export",
+  ADMIN: "vaults:admin",
 };
 
 const MANAGEMENT_SCOPES = new Set(Object.values(API_SCOPES));

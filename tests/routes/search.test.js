@@ -3,6 +3,7 @@ import { handleSearchItems, handleGetVaultStats, handleGetVaultChanges } from ".
 import {
   makeMockSupabase,
   makeMockSupabaseMulti,
+  makeCapturingSupabaseMulti,
   makeApiKeyPrincipal,
   makeContext,
   makeEvent,
@@ -80,6 +81,29 @@ describe("handleGetVaultStats", () => {
     const res = await handleGetVaultStats(supabase, principal, CTX, "v1");
 
     expect(res.statusCode).toBe(403);
+  });
+
+  it("includes related_publication_id in the relation count filter", async () => {
+    const vault = makeMockVault();
+    const { supabase, captured } = makeCapturingSupabaseMulti(
+      {
+        vaults: [{ data: vault, error: null }],
+        vault_publications: [
+          { data: null, error: null, count: 1 },   // items count
+          { data: [{ id: "p1" }], error: null },   // pub IDs list
+        ],
+        tags: [{ data: null, error: null, count: 0 }],
+        publication_relations: [{ data: null, error: null, count: 0 }],
+      },
+      ["publication_relations"],
+    );
+    const principal = makeApiKeyPrincipal();
+
+    await handleGetVaultStats(supabase, principal, CTX, vault.id);
+
+    const orFilter = captured["publication_relations"].orFilters[0];
+    // Buggy code: only "publication_id.eq.p1". Fixed code: also includes "related_publication_id.eq.p1".
+    expect(orFilter).toContain("related_publication_id.eq.p1");
   });
 
   it("returns 200 with counts", async () => {

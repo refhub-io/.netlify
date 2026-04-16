@@ -63,9 +63,12 @@ export async function handleBulkUpsertItems(supabase, principal, context, vaultI
 
   const body = parsed.value || {};
 
-  // Idempotency check — runs before vault access so retries short-circuit quickly
-  if (body.idempotency_key) {
-    const cached = upsertIdempotencyCache.get(body.idempotency_key);
+  // Idempotency check — scoped to principal + vault so keys never leak across tenants.
+  const idempotencyCacheKey = body.idempotency_key
+    ? `${principal.userId}:${vaultId}:${body.idempotency_key}`
+    : null;
+  if (idempotencyCacheKey) {
+    const cached = upsertIdempotencyCache.get(idempotencyCacheKey);
     if (cached && cached.expiresAt > Date.now()) {
       return json(200, cached.result);
     }
@@ -185,8 +188,8 @@ export async function handleBulkUpsertItems(supabase, principal, context, vaultI
     meta: { request_id: context.requestId, vault_id: vaultId },
   };
 
-  if (body.idempotency_key) {
-    upsertIdempotencyCache.set(body.idempotency_key, {
+  if (idempotencyCacheKey) {
+    upsertIdempotencyCache.set(idempotencyCacheKey, {
       result,
       expiresAt: Date.now() + IDEMPOTENCY_TTL_MS,
     });
@@ -198,11 +201,11 @@ export async function handleBulkUpsertItems(supabase, principal, context, vaultI
 // ─── Import preview ───────────────────────────────────────────────────────────
 
 export async function handleImportPreview(supabase, principal, context, vaultId, event) {
-  if (!requireScope(principal, API_SCOPES.WRITE)) {
-    return errorResponse(403, "missing_scope", "Scope vaults:write is required", context.requestId);
+  if (!requireScope(principal, API_SCOPES.READ)) {
+    return errorResponse(403, "missing_scope", "Scope vaults:read is required", context.requestId);
   }
 
-  const access = await resolveVaultAccess(supabase, principal, vaultId, "editor");
+  const access = await resolveVaultAccess(supabase, principal, vaultId, "viewer");
   if (!access.ok) {
     return errorResponse(access.status, access.code, "Vault access denied", context.requestId);
   }

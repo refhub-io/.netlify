@@ -231,6 +231,17 @@ export async function handleDetachTags(supabase, principal, context, vaultId, ev
     return errorResponse(400, "invalid_body", "Body must include a non-empty tag_ids array", context.requestId);
   }
 
+  // Verify the item belongs to this vault before deleting (mirrors handleAttachTags)
+  const { data: item, error: itemError } = await supabase
+    .from("vault_publications")
+    .select("id")
+    .eq("id", body.item_id)
+    .eq("vault_id", vaultId)
+    .maybeSingle();
+
+  if (itemError) throw itemError;
+  if (!item) return errorResponse(404, "item_not_found", "Item not found in this vault", context.requestId);
+
   const { error } = await supabase
     .from("publication_tags")
     .delete()

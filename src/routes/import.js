@@ -159,6 +159,9 @@ async function insertVaultPublication(supabase, principal, vaultId, pubData) {
 
   if (pubError) throw pubError;
 
+  // Build the vault_publications row without user_id (that column belongs to
+  // the publications table only; vault_publications uses created_by instead).
+  const { user_id: _omit, ...pubFields } = pubRow;
   const { data: vaultPub, error: vaultPubError } = await supabase
     .from("vault_publications")
     .insert({
@@ -166,7 +169,7 @@ async function insertVaultPublication(supabase, principal, vaultId, pubData) {
       original_publication_id: pub.id,
       created_by: principal.userId,
       version: 1,
-      ...pubRow,
+      ...pubFields,
     })
     .select(VAULT_PUBLICATION_SELECT)
     .single();

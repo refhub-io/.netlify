@@ -10,6 +10,7 @@ import {
   parseBody,
 } from "../helpers.js";
 
+
 const CTX = makeContext();
 
 // ─── handleDeleteItem ────────────────────────────────────────────────────────
@@ -122,6 +123,30 @@ describe("handleBulkUpsertItems", () => {
     expect(parseBody(res).data.errors).toHaveLength(1);
   });
 
+  it("does not serve cached result to a different principal", async () => {
+    const vault = makeMockVault({ user_id: "user-A" });
+    const newVaultPub = { id: "vp1", title: "Paper", vault_id: vault.id };
+    const supabaseA = makeMockSupabaseMulti({
+      vaults: [{ data: vault, error: null }],
+      vault_publications: [{ data: [], error: null }, { data: newVaultPub, error: null }],
+      publications: [{ data: { id: "pub1" }, error: null }],
+    });
+    const principalA = makeApiKeyPrincipal({ userId: "user-A" });
+    const key = `cross-tenant-${Date.now()}`;
+    const makeEvt = () => makeEvent({ body: JSON.stringify({ items: [{ title: "Paper" }], idempotency_key: key }) });
+
+    const first = await handleBulkUpsertItems(supabaseA, principalA, CTX, vault.id, makeEvt());
+    expect(first.statusCode).toBe(200);
+
+    // Principal B uses the same key but must NOT get A's cached result
+    const principalB = makeApiKeyPrincipal({ userId: "user-B" });
+    const brokenSupabase = makeMockSupabase({ vaults: { data: null, error: null } }); // vault not found for B
+    const second = await handleBulkUpsertItems(brokenSupabase, principalB, CTX, vault.id, makeEvt());
+
+    // Buggy code: returns 200 (cache hit). Fixed code: 404 (vault not found, separate cache key).
+    expect(second.statusCode).toBe(404);
+  });
+
   it("returns cached result for same idempotency key", async () => {
     const vault = makeMockVault();
     const newVaultPub = { id: "vp1", title: "Cached Paper", vault_id: vault.id };
@@ -166,6 +191,21 @@ describe("handleImportPreview", () => {
     const res = await handleImportPreview(supabase, principal, CTX, vault.id, event);
 
     expect(res.statusCode).toBe(400);
+  });
+
+  it("returns 200 for a read-only key (preview writes nothing)", async () => {
+    const vault = makeMockVault();
+    const supabase = makeMockSupabaseMulti({
+      vaults: [{ data: vault, error: null }],
+      vault_publications: [{ data: [], error: null }],
+    });
+    const principal = makeApiKeyPrincipal({ scopes: ["vaults:read"] });
+    const event = makeEvent({ body: JSON.stringify({ items: [{ title: "T", doi: "10.1/x" }] }) });
+
+    const res = await handleImportPreview(supabase, principal, CTX, vault.id, event);
+
+    // Buggy code: 403 (requires write scope). Fixed code: 200 (preview is read-only).
+    expect(res.statusCode).toBe(200);
   });
 
   it("classifies new items as would_create", async () => {

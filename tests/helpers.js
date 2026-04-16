@@ -78,7 +78,7 @@ export function makeApiKeyPrincipal(overrides = {}) {
   return {
     authType: "api_key",
     keyId: "key-test",
-    userId: "user-test",
+    userId: overrides.userId ?? "user-test",
     label: "Test Key",
     scopes: new Set(scopeList),
     restrictedVaultIds: overrides.restrictedVaultIds ?? null,
@@ -144,4 +144,56 @@ export function makeMockVault(overrides = {}) {
 /** Parse the response body JSON and return it. */
 export function parseBody(response) {
   return JSON.parse(response.body);
+}
+
+/**
+ * Multi-call variant that also captures insert/update/or arguments for
+ * specified tables.  Useful for asserting what data was written to the DB.
+ *
+ * @param {Record<string, Array<{data?, error?, count?}>>} tableResultQueues
+ * @param {string[]} captureTargets  table names whose insert/update/or calls should be recorded
+ * @returns {{ supabase, captured: Record<string, { inserts: any[], updates: any[], orFilters: string[] }> }}
+ */
+export function makeCapturingSupabaseMulti(tableResultQueues = {}, captureTargets = []) {
+  const cursors = {};
+  const captured = Object.fromEntries(
+    captureTargets.map((t) => [t, { inserts: [], updates: [], orFilters: [] }]),
+  );
+
+  function makeChain(table, result) {
+    const shouldCapture = captureTargets.includes(table);
+    const proxy = new Proxy(
+      {},
+      {
+        get(_, prop) {
+          if (prop === "then") return (fn) => Promise.resolve(result).then(fn);
+          if (prop === "catch") return (fn) => Promise.resolve(result).catch(fn);
+          if (prop === "finally") return (fn) => Promise.resolve(result).finally(fn);
+          if (prop === "maybeSingle") return () => Promise.resolve(result);
+          if (prop === "single") return () => Promise.resolve(result);
+          if (shouldCapture) {
+            if (prop === "insert") return (arg) => { captured[table].inserts.push(arg); return proxy; };
+            if (prop === "update") return (arg) => { captured[table].updates.push(arg); return proxy; };
+            if (prop === "or") return (filter) => { captured[table].orFilters.push(filter); return proxy; };
+          }
+          return () => proxy;
+        },
+      },
+    );
+    return proxy;
+  }
+
+  return {
+    supabase: {
+      from(table) {
+        const queue = tableResultQueues[table] ?? [];
+        const idx = cursors[table] ?? 0;
+        cursors[table] = idx + 1;
+        const result = queue[idx] ?? { data: null, error: null };
+        return makeChain(table, result);
+      },
+      auth: { getUser: () => Promise.resolve({ data: { user: null }, error: null }) },
+    },
+    captured,
+  };
 }

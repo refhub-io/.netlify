@@ -12,6 +12,7 @@ import {
 import {
   makeMockSupabase,
   makeMockSupabaseMulti,
+  makeCapturingSupabaseMulti,
   makeApiKeyPrincipal,
   makeContext,
   makeEvent,
@@ -77,6 +78,18 @@ describe("handleCreateVault", () => {
 
     expect(res.statusCode).toBe(201);
     expect(parseBody(res).data).toEqual(mockVault);
+  });
+
+  it("returns 400 when visibility is public but public_slug is missing", async () => {
+    const supabase = makeMockSupabase({});
+    const principal = makeApiKeyPrincipal();
+    const event = makeEvent({ method: "POST", body: JSON.stringify({ name: "Public Vault", visibility: "public" }) });
+
+    const res = await handleCreateVault(supabase, principal, CTX, event);
+
+    // Buggy code: creates vault without slug → 201. Fixed code: 400.
+    expect(res.statusCode).toBe(400);
+    expect(parseBody(res).error.code).toBe("invalid_body");
   });
 
   it("defaults visibility to private", async () => {
@@ -202,6 +215,25 @@ describe("handleUpdateVaultVisibility", () => {
     expect(parseBody(res).error.code).toBe("invalid_body");
   });
 
+  it("does not include public_slug in update when switching to protected without providing a slug", async () => {
+    const vault = makeMockVault({ visibility: "public", public_slug: "my-slug" });
+    const { supabase, captured } = makeCapturingSupabaseMulti(
+      {
+        vaults: [{ data: vault, error: null }, { data: vault, error: null }],
+      },
+      ["vaults"],
+    );
+    const principal = makeApiKeyPrincipal();
+    const event = makeEvent({ body: JSON.stringify({ visibility: "protected" }) });
+
+    await handleUpdateVaultVisibility(supabase, principal, CTX, vault.id, event);
+
+    const updateArg = captured["vaults"].updates[0];
+    expect(updateArg).toBeDefined();
+    // Buggy code: updateArg.public_slug === null. Fixed code: public_slug not in updateArg.
+    expect(Object.keys(updateArg)).not.toContain("public_slug");
+  });
+
   it("returns 200 when setting to public with slug", async () => {
     const vault = makeMockVault();
     const updatedVault = { ...vault, visibility: "public", public_slug: "my-vault" };
@@ -260,6 +292,20 @@ describe("handleCreateVaultShare", () => {
     const res = await handleCreateVaultShare(supabase, principal, CTX, vault.id, event);
 
     expect(res.statusCode).toBe(400);
+  });
+
+  it("returns 400 when email is whitespace only", async () => {
+    const vault = makeMockVault();
+    const supabase = makeVaultAccessMock(vault);
+    const principal = makeApiKeyPrincipal();
+    const event = makeEvent({ body: JSON.stringify({ email: "   ", role: "viewer" }) });
+
+    const res = await handleCreateVaultShare(supabase, principal, CTX, vault.id, event);
+
+    // Buggy code: "   " passes string check, trimmed to "" and stored → 201.
+    // Fixed code: validates after trim → 400.
+    expect(res.statusCode).toBe(400);
+    expect(parseBody(res).error.code).toBe("invalid_body");
   });
 
   it("returns 400 when role is invalid", async () => {

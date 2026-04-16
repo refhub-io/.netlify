@@ -42,6 +42,10 @@ export async function handleCreateVault(supabase, principal, context, event) {
 
   const visibility = VALID_VISIBILITIES.includes(body.visibility) ? body.visibility : "private";
 
+  if (visibility === "public" && !body.public_slug) {
+    return errorResponse(400, "invalid_body", "public_slug is required for public visibility", context.requestId);
+  }
+
   const row = {
     user_id: principal.userId,
     name: body.name.trim(),
@@ -50,7 +54,7 @@ export async function handleCreateVault(supabase, principal, context, event) {
     visibility,
   };
 
-  if (visibility === "public" && body.public_slug) {
+  if (visibility === "public") {
     row.public_slug = body.public_slug;
   }
 
@@ -160,8 +164,16 @@ export async function handleUpdateVaultVisibility(supabase, principal, context, 
   }
 
   const updateRow = { visibility: body.visibility };
-  // Always pass through public_slug; clear it when moving to non-public unless caller supplies one
-  updateRow.public_slug = body.public_slug || null;
+  // public: always set (required and validated above)
+  // private: always clear
+  // protected: only touch the slug if the caller explicitly provides one
+  if (body.visibility === "public") {
+    updateRow.public_slug = body.public_slug;
+  } else if (body.visibility === "private") {
+    updateRow.public_slug = null;
+  } else if (Object.prototype.hasOwnProperty.call(body, "public_slug")) {
+    updateRow.public_slug = body.public_slug || null;
+  }
 
   const { data: vault, error } = await supabase
     .from("vaults")
@@ -219,7 +231,8 @@ export async function handleCreateVaultShare(supabase, principal, context, vault
   }
 
   const body = parsed.value || {};
-  if (!body.email || typeof body.email !== "string") {
+  const trimmedEmail = typeof body.email === "string" ? body.email.trim() : "";
+  if (!trimmedEmail) {
     return errorResponse(400, "invalid_body", "Body must include an email", context.requestId);
   }
 
@@ -230,7 +243,7 @@ export async function handleCreateVaultShare(supabase, principal, context, vault
 
   const shareRow = {
     vault_id: vaultId,
-    shared_with_email: body.email.toLowerCase().trim(),
+    shared_with_email: trimmedEmail.toLowerCase(),
     shared_by: principal.userId,
     role,
   };

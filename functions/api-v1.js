@@ -1738,7 +1738,8 @@ export async function handler(event) {
       route[0] === "references" ||
       route[0] === "citations" ||
       route[0] === "lookup" ||
-      route[0] === "google-drive";
+      route[0] === "google-drive" ||
+      route[0] === "audit";
 
     if (isManagementRoute) {
       const authorization = event.headers?.authorization || event.headers?.Authorization || null;

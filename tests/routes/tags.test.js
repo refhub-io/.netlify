@@ -211,9 +211,29 @@ describe("handleDetachTags", () => {
     expect(res.statusCode).toBe(400);
   });
 
+  it("returns 404 when item_id does not belong to the vault", async () => {
+    const vault = makeMockVault();
+    const supabase = makeMockSupabaseMulti({
+      vaults: [{ data: vault, error: null }],
+      // vault_publications ownership check returns null → item not in vault
+      vault_publications: [{ data: null, error: null }],
+    });
+    const principal = makeApiKeyPrincipal();
+    const event = makeEvent({ body: JSON.stringify({ item_id: "foreign-item", tag_ids: ["t1"] }) });
+
+    const res = await handleDetachTags(supabase, principal, CTX, vault.id, event);
+
+    // Buggy code: no ownership check, returns 200. Fixed code: 404.
+    expect(res.statusCode).toBe(404);
+  });
+
   it("returns 200 on success", async () => {
     const vault = makeMockVault();
-    const supabase = makeVaultMock(vault, { publication_tags: { data: null, error: null } });
+    const supabase = makeMockSupabaseMulti({
+      vaults: [{ data: vault, error: null }],
+      vault_publications: [{ data: { id: "pub1" }, error: null }], // ownership check
+      publication_tags: [{ data: null, error: null }],             // delete
+    });
     const principal = makeApiKeyPrincipal();
     const event = makeEvent({ body: JSON.stringify({ item_id: "pub1", tag_ids: ["t1"] }) });
 

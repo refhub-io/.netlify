@@ -3,6 +3,7 @@ import { handleImportBibtex, handleImportUrl } from "../../src/routes/import.js"
 import {
   makeMockSupabase,
   makeMockSupabaseMulti,
+  makeCapturingSupabaseMulti,
   makeApiKeyPrincipal,
   makeContext,
   makeEvent,
@@ -74,6 +75,33 @@ describe("handleImportBibtex", () => {
     expect(res.statusCode).toBe(201);
     expect(parseBody(res).data.created).toHaveLength(1);
     expect(parseBody(res).data.errors).toHaveLength(0);
+  });
+});
+
+// ─── insertVaultPublication (via handleImportUrl) ────────────────────────────
+
+describe("insertVaultPublication", () => {
+  it("does not include user_id in the vault_publications insert", async () => {
+    const vault = makeMockVault();
+    const vaultPub = { id: "vp1", url: "https://example.com" };
+
+    const { supabase, captured } = makeCapturingSupabaseMulti(
+      {
+        vaults: [{ data: vault, error: null }],
+        publications: [{ data: { id: "pub1" }, error: null }],
+        vault_publications: [{ data: vaultPub, error: null }],
+      },
+      ["vault_publications"],
+    );
+    const principal = makeApiKeyPrincipal();
+    const event = makeEvent({ body: JSON.stringify({ url: "https://example.com" }) });
+
+    const res = await handleImportUrl(supabase, principal, CTX, vault.id, event);
+
+    expect(res.statusCode).toBe(201);
+    const insertArg = captured["vault_publications"].inserts[0];
+    expect(insertArg).toBeDefined();
+    expect(Object.keys(insertArg)).not.toContain("user_id");
   });
 });
 

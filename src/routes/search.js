@@ -63,7 +63,12 @@ export async function handleSearchItems(supabase, principal, context, vaultId, e
   if (tagFilterIds) query = query.in("id", tagFilterIds);
 
   if (params.q) {
-    query = query.or(`title.ilike.%${params.q}%,abstract.ilike.%${params.q}%`);
+    // Strip PostgREST filter-syntax characters (commas, parens) from q before
+    // interpolating into the OR filter, preventing filter injection.
+    const safeQ = params.q.replace(/[(),]/g, " ").trim();
+    if (safeQ) {
+      query = query.or(`title.ilike.%${safeQ}%,abstract.ilike.%${safeQ}%`);
+    }
   }
 
   if (params.author) {
@@ -133,7 +138,10 @@ export async function handleGetVaultStats(supabase, principal, context, vaultId)
   let relationCount = 0;
 
   if (pubIds.length > 0) {
-    const orFilter = pubIds.map((id) => `publication_id.eq.${id}`).join(",");
+    // Count relations where the vault's items appear on either side of the relationship.
+    const orFilter = pubIds
+      .flatMap((id) => [`publication_id.eq.${id}`, `related_publication_id.eq.${id}`])
+      .join(",");
     const relResult = await supabase
       .from("publication_relations")
       .select("id", { count: "exact", head: true })

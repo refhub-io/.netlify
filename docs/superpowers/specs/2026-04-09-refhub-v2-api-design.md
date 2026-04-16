@@ -147,7 +147,7 @@ DELETE /api/v1/vaults/:vaultId/shares/:shareId     remove collaborator
 
 - Scope: `vaults:admin` + owner permission.
 - Hard delete. DB foreign key cascades remove `vault_publications`, `tags`, `vault_shares`, `api_key_vaults` entries. No undo.
-- Returns `204 No Content`.
+- Returns `200 OK` with `{ data: { id } }`.
 
 ### Set visibility — `PATCH /api/v1/vaults/:vaultId/visibility`
 
@@ -163,9 +163,9 @@ DELETE /api/v1/vaults/:vaultId/shares/:shareId     remove collaborator
 
 - Scope: `vaults:admin` + owner permission on the vault.
 - **Auto-upgrade:** When adding a share to a `private` vault, the vault is automatically upgraded to `protected`.
-- `POST` body: `{ email?, user_id?, role }` where role is `viewer | editor | owner`.
+- `POST` body: `{ email, role }` where role is `viewer | editor`. Email must be non-empty after trimming.
 - `PATCH` body: `{ role }`.
-- `DELETE` returns `204 No Content`.
+- `DELETE` returns `200 OK` with `{ data: { id } }`.
 - Uses `vault_shares` table directly.
 
 ---
@@ -188,20 +188,20 @@ POST   /api/v1/vaults/:vaultId/items/import-preview   dry-run duplicate check
 - Hard deletes from `vault_publications`. Cascades `publication_tags`.
 - The underlying `publications` row is **not** deleted (may be referenced by other vaults via `original_publication_id`).
 - Bumps `vaults.updated_at`.
-- Returns `204 No Content`.
+- Returns `200 OK` with `{ data: { id } }`.
 
 ### Bulk upsert — `POST /api/v1/vaults/:vaultId/items/upsert`
 
 - Scope: `vaults:write` + editor permission.
 - Body: `{ items: [...], idempotency_key?: string }`
-- Match strategy: DOI match first, then title+year match.
-- Per-item result: `{ action: 'created' | 'updated' | 'skipped', id, ... }`
-- Idempotency: if `idempotency_key` was seen within 24h, return previous result without re-executing. Stored in an in-memory map (same pattern as Semantic Scholar cache).
+- Match strategy: DOI match first, then `bibtex_key` match.
+- Per-item result: `{ action: 'created' | 'updated', id, ... }` (no `skipped` — unmatched items are created).
+- Idempotency: if `idempotency_key` was seen within 5 minutes **for the same principal and vault**, return previous result without re-executing. Stored in an in-memory map keyed by `userId:vaultId:idempotency_key`.
 - Bumps `vaults.updated_at` on any create or update.
 
 ### Import preview — `POST /api/v1/vaults/:vaultId/items/import-preview`
 
-- Scope: `vaults:read`. Writes nothing.
+- Scope: `vaults:read` + viewer permission. Writes nothing.
 - Same body and response shape as upsert. Dry-run only.
 - Useful for agents showing the user what would change before committing.
 

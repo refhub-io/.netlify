@@ -11,7 +11,9 @@
   "workspace": {
     "packageJson": {
       "dependencies": [
-        "npm:@supabase/supabase-js@^2.89.0"
+        "npm:@supabase/supabase-js@^2.89.0",
+        "npm:pdf-parse@^1.1.4",
+        "npm:vitest@^2.1.9"
       ]
     }
   }

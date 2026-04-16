@@ -46,6 +46,51 @@ import {
   normalizeSemanticScholarDoiRequest,
 } from "../src/semantic-scholar.js";
 
+// ── V2 route modules ──────────────────────────────────────────────────────────
+import {
+  handleCreateVault,
+  handleUpdateVault,
+  handleDeleteVault,
+  handleUpdateVaultVisibility,
+  handleListVaultShares,
+  handleCreateVaultShare,
+  handleUpdateVaultShare,
+  handleDeleteVaultShare,
+} from "../src/routes/vaults.js";
+import {
+  handleListTags,
+  handleCreateTag,
+  handleUpdateTag,
+  handleDeleteTag,
+  handleAttachTags,
+  handleDetachTags,
+} from "../src/routes/tags.js";
+import {
+  handleListRelations,
+  handleCreateRelation,
+  handleUpdateRelation,
+  handleDeleteRelation,
+} from "../src/routes/relations.js";
+import {
+  handleSearchItems,
+  handleGetVaultStats,
+  handleGetVaultChanges,
+} from "../src/routes/search.js";
+import {
+  handleDeleteItem,
+  handleBulkUpsertItems,
+  handleImportPreview,
+} from "../src/routes/items.js";
+import {
+  handleImportDoi,
+  handleImportBibtex,
+  handleImportUrl,
+} from "../src/routes/import.js";
+import {
+  handleListVaultAudit,
+  handleListGlobalAudit,
+} from "../src/routes/audit.js";
+
 const PUBLICATION_FIELDS = [
   "title",
   "authors",
@@ -351,7 +396,7 @@ function normalizeRequestedScopes(scopes) {
 
   const normalized = [...new Set(scopes)];
   if (normalized.some((scope) => typeof scope !== "string" || !isValidApiKeyScope(scope))) {
-    return { error: "invalid_scopes", message: "Scopes must be one of vaults:read, vaults:write, vaults:export" };
+    return { error: "invalid_scopes", message: "Scopes must be one of vaults:read, vaults:write, vaults:export, vaults:admin" };
   }
 
   return { value: normalized };
@@ -1693,7 +1738,8 @@ export async function handler(event) {
       route[0] === "references" ||
       route[0] === "citations" ||
       route[0] === "lookup" ||
-      route[0] === "google-drive";
+      route[0] === "google-drive" ||
+      route[0] === "audit";
 
     if (isManagementRoute) {
       const authorization = event.headers?.authorization || event.headers?.Authorization || null;
@@ -1753,6 +1799,9 @@ export async function handler(event) {
         response = await handleEnsureGoogleDriveFolder(supabase, principal, context);
       } else if (route.length === 1 && route[0] === "google-drive" && event.httpMethod === "DELETE") {
         response = await handleDisconnectGoogleDrive(supabase, principal, context);
+      // ── V2 management routes ────────────────────────────────────────────────
+      } else if (route.length === 1 && route[0] === "audit" && event.httpMethod === "GET") {
+        response = await handleListGlobalAudit(supabase, principal, context, event);
       } else {
         response = errorResponse(404, "route_not_found", "Route not found", context.requestId);
       }
@@ -1772,8 +1821,76 @@ export async function handler(event) {
 
       if (route.length === 1 && route[0] === "vaults" && event.httpMethod === "GET") {
         response = await handleListVaults(supabase, principal, context);
+      // ── V2: vault CRUD ──────────────────────────────────────────────────────
+      } else if (route.length === 1 && route[0] === "vaults" && event.httpMethod === "POST") {
+        response = await handleCreateVault(supabase, principal, context, event);
       } else if (route.length === 2 && route[0] === "vaults" && event.httpMethod === "GET") {
         response = await handleReadVault(supabase, principal, context, route[1]);
+      } else if (route.length === 2 && route[0] === "vaults" && event.httpMethod === "PATCH") {
+        response = await handleUpdateVault(supabase, principal, context, route[1], event);
+      } else if (route.length === 2 && route[0] === "vaults" && event.httpMethod === "DELETE") {
+        response = await handleDeleteVault(supabase, principal, context, route[1]);
+      // ── V2: visibility ──────────────────────────────────────────────────────
+      } else if (route.length === 3 && route[0] === "vaults" && route[2] === "visibility" && event.httpMethod === "PATCH") {
+        response = await handleUpdateVaultVisibility(supabase, principal, context, route[1], event);
+      // ── V2: shares ──────────────────────────────────────────────────────────
+      } else if (route.length === 3 && route[0] === "vaults" && route[2] === "shares" && event.httpMethod === "GET") {
+        response = await handleListVaultShares(supabase, principal, context, route[1]);
+      } else if (route.length === 3 && route[0] === "vaults" && route[2] === "shares" && event.httpMethod === "POST") {
+        response = await handleCreateVaultShare(supabase, principal, context, route[1], event);
+      } else if (route.length === 4 && route[0] === "vaults" && route[2] === "shares" && event.httpMethod === "PATCH") {
+        response = await handleUpdateVaultShare(supabase, principal, context, route[1], route[3], event);
+      } else if (route.length === 4 && route[0] === "vaults" && route[2] === "shares" && event.httpMethod === "DELETE") {
+        response = await handleDeleteVaultShare(supabase, principal, context, route[1], route[3]);
+      // ── V2: tags ────────────────────────────────────────────────────────────
+      } else if (route.length === 3 && route[0] === "vaults" && route[2] === "tags" && event.httpMethod === "GET") {
+        response = await handleListTags(supabase, principal, context, route[1]);
+      } else if (route.length === 3 && route[0] === "vaults" && route[2] === "tags" && event.httpMethod === "POST") {
+        response = await handleCreateTag(supabase, principal, context, route[1], event);
+      } else if (route.length === 4 && route[0] === "vaults" && route[2] === "tags" && route[3] === "attach" && event.httpMethod === "POST") {
+        response = await handleAttachTags(supabase, principal, context, route[1], event);
+      } else if (route.length === 4 && route[0] === "vaults" && route[2] === "tags" && route[3] === "detach" && event.httpMethod === "POST") {
+        response = await handleDetachTags(supabase, principal, context, route[1], event);
+      } else if (route.length === 4 && route[0] === "vaults" && route[2] === "tags" && event.httpMethod === "PATCH") {
+        response = await handleUpdateTag(supabase, principal, context, route[1], route[3], event);
+      } else if (route.length === 4 && route[0] === "vaults" && route[2] === "tags" && event.httpMethod === "DELETE") {
+        response = await handleDeleteTag(supabase, principal, context, route[1], route[3]);
+      // ── V2: relations ───────────────────────────────────────────────────────
+      } else if (route.length === 3 && route[0] === "vaults" && route[2] === "relations" && event.httpMethod === "GET") {
+        response = await handleListRelations(supabase, principal, context, route[1], event);
+      } else if (route.length === 3 && route[0] === "vaults" && route[2] === "relations" && event.httpMethod === "POST") {
+        response = await handleCreateRelation(supabase, principal, context, route[1], event);
+      } else if (route.length === 4 && route[0] === "vaults" && route[2] === "relations" && event.httpMethod === "PATCH") {
+        response = await handleUpdateRelation(supabase, principal, context, route[1], route[3], event);
+      } else if (route.length === 4 && route[0] === "vaults" && route[2] === "relations" && event.httpMethod === "DELETE") {
+        response = await handleDeleteRelation(supabase, principal, context, route[1], route[3]);
+      // ── V2: search / stats / changes ────────────────────────────────────────
+      } else if (route.length === 3 && route[0] === "vaults" && route[2] === "items" && event.httpMethod === "GET") {
+        response = await handleSearchItems(supabase, principal, context, route[1], event);
+      } else if (route.length === 3 && route[0] === "vaults" && route[2] === "search" && event.httpMethod === "GET") {
+        response = await handleSearchItems(supabase, principal, context, route[1], event);
+      } else if (route.length === 3 && route[0] === "vaults" && route[2] === "stats" && event.httpMethod === "GET") {
+        response = await handleGetVaultStats(supabase, principal, context, route[1]);
+      } else if (route.length === 3 && route[0] === "vaults" && route[2] === "changes" && event.httpMethod === "GET") {
+        response = await handleGetVaultChanges(supabase, principal, context, route[1], event);
+      // ── V2: item delete / upsert / preview ──────────────────────────────────
+      } else if (route.length === 4 && route[0] === "vaults" && route[2] === "items" && route[3] === "upsert" && event.httpMethod === "POST") {
+        response = await handleBulkUpsertItems(supabase, principal, context, route[1], event);
+      } else if (route.length === 4 && route[0] === "vaults" && route[2] === "items" && route[3] === "import-preview" && event.httpMethod === "POST") {
+        response = await handleImportPreview(supabase, principal, context, route[1], event);
+      } else if (route.length === 4 && route[0] === "vaults" && route[2] === "items" && event.httpMethod === "DELETE") {
+        response = await handleDeleteItem(supabase, principal, context, route[1], route[3]);
+      // ── V2: import ──────────────────────────────────────────────────────────
+      } else if (route.length === 4 && route[0] === "vaults" && route[2] === "import" && route[3] === "doi" && event.httpMethod === "POST") {
+        response = await handleImportDoi(supabase, principal, context, route[1], event);
+      } else if (route.length === 4 && route[0] === "vaults" && route[2] === "import" && route[3] === "bibtex" && event.httpMethod === "POST") {
+        response = await handleImportBibtex(supabase, principal, context, route[1], event);
+      } else if (route.length === 4 && route[0] === "vaults" && route[2] === "import" && route[3] === "url" && event.httpMethod === "POST") {
+        response = await handleImportUrl(supabase, principal, context, route[1], event);
+      // ── V2: audit ───────────────────────────────────────────────────────────
+      } else if (route.length === 3 && route[0] === "vaults" && route[2] === "audit" && event.httpMethod === "GET") {
+        response = await handleListVaultAudit(supabase, principal, context, route[1], event);
+      // ── existing routes ─────────────────────────────────────────────────────
       } else if (route.length === 1 && route[0] === "doi-metadata" && event.httpMethod === "POST") {
         response = await handleSemanticScholarDoiMetadataRoute(context, event, principal);
       } else if (route.length === 1 && route[0] === "pdf-metadata" && event.httpMethod === "POST") {

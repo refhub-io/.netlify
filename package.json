@@ -1,9 +1,9 @@
 {
-  "name": "@refhub/netlify-backend",
+  "name": "@refhub/api",
   "private": true,
-  "version": "0.1.0",
+  "version": "2.0.0",
   "type": "module",
-  "description": "RefHub Netlify Functions backend scaffold",
+  "description": "refhub netlify api",
   "scripts": {
     "check": "node --check functions/api-v1.js && node --check src/auth.js && node --check src/config.js && node --check src/export.js && node --check src/google-drive.js && node --check src/http.js && node --check src/semantic-scholar.js",
     "test": "vitest run"

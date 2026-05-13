@@ -840,6 +840,24 @@ async function upsertPdfAssetRecord(supabase, record) {
   return result.data;
 }
 
+async function upsertPublicationLevelPdfAssetRecord(supabase, record) {
+  if (!record.publication_id) {
+    return null;
+  }
+
+  return upsertPdfAssetRecord(supabase, {
+    ...record,
+    vault_publication_id: null,
+  });
+}
+
+async function upsertVaultAndPublicationPdfAssetRecords(supabase, record) {
+  const vaultRecord = await upsertPdfAssetRecord(supabase, record);
+  const publicationRecord = await upsertPublicationLevelPdfAssetRecord(supabase, record);
+
+  return { vaultRecord, publicationRecord };
+}
+
 async function resolveOpenAccessPdfUrl(doi, fallbackUrl) {
   if (!doi) {
     return { url: fallbackUrl, via: "source" };
@@ -961,7 +979,7 @@ export async function uploadPdfToGoogleDriveForUser({
     const uploaded = await uploadDriveFile(accessToken, folder.folderId, filename, pdfBuffer);
     console.log("[drive] uploaded to Drive", { fileId: uploaded.id, filename, webViewLink: uploaded.webViewLink });
 
-    await upsertPdfAssetRecord(supabase, {
+    await upsertVaultAndPublicationPdfAssetRecords(supabase, {
       user_id: userId,
       publication_id: publicationId,
       vault_publication_id: vaultPublicationId,
@@ -986,7 +1004,7 @@ export async function uploadPdfToGoogleDriveForUser({
   } catch (error) {
     console.error("[drive] upload failed", { userId, sourceUrl, code: error.code, message: error.message });
 
-    await upsertPdfAssetRecord(supabase, {
+    await upsertVaultAndPublicationPdfAssetRecords(supabase, {
       user_id: userId,
       publication_id: publicationId,
       vault_publication_id: vaultPublicationId,
@@ -1066,7 +1084,7 @@ export async function recordBrowserDriveUpload(supabase, {
   webViewLink,
   sourceUrl,
 }) {
-  await upsertPdfAssetRecord(supabase, {
+  await upsertVaultAndPublicationPdfAssetRecords(supabase, {
     user_id: userId,
     publication_id: publicationId,
     vault_publication_id: vaultPublicationId,

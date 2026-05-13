@@ -821,10 +821,14 @@ async function uploadDriveFile(accessToken, folderId, filename, pdfBuffer) {
 }
 
 async function upsertPdfAssetRecord(supabase, record) {
+  const onConflict = record.vault_publication_id
+    ? "vault_publication_id,storage_provider"
+    : "publication_id,storage_provider";
+
   const result = await supabase
     .from("publication_pdf_assets")
     .upsert(record, {
-      onConflict: "vault_publication_id,storage_provider",
+      onConflict,
     })
     .select("*")
     .single();

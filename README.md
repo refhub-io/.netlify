@@ -135,6 +135,9 @@ optional:
 
 ```
 SEMANTIC_SCHOLAR_API_KEY       ← recommended for stable upstream rate limits
+SEMANTIC_SCHOLAR_RATE_LIMIT_MAX_REQUESTS ← per-user request cap, defaults to 60
+SEMANTIC_SCHOLAR_RATE_LIMIT_WINDOW_MS    ← rate-limit window, defaults to 60000
+SEMANTIC_SCHOLAR_TIMEOUT_MS              ← upstream timeout, defaults to 8000
 REFHUB_API_MAX_BULK_ITEMS      ← defaults to 50
 REFHUB_API_MAX_BODY_BYTES      ← defaults to 262144
 REFHUB_API_AUDIT_DISABLED      ← defaults to false

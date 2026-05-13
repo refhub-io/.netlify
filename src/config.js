@@ -4,6 +4,9 @@ import path from "node:path";
 const DEFAULT_MAX_BULK_ITEMS = 50;
 const DEFAULT_MAX_BODY_BYTES = 50 * 1024 * 1024;
 const DEFAULT_ALLOWED_ORIGINS = ["https://refhub.io", "http://localhost:3000"];
+const DEFAULT_SEMANTIC_SCHOLAR_RATE_LIMIT_MAX_REQUESTS = 60;
+const DEFAULT_SEMANTIC_SCHOLAR_RATE_LIMIT_WINDOW_MS = 60 * 1000;
+const DEFAULT_SEMANTIC_SCHOLAR_TIMEOUT_MS = 8000;
 const LOCAL_ENV_FILES = [".env.local", ".env"];
 
 let localEnvLoaded = false;
@@ -69,6 +72,20 @@ function readRequired(name) {
   return value;
 }
 
+function readPositiveInteger(name, defaultValue) {
+  const raw = process.env[name];
+  if (raw === undefined || raw === null || raw === "") {
+    return defaultValue;
+  }
+
+  const value = Number(raw);
+  if (!Number.isInteger(value) || value < 1) {
+    throw new Error(`${name} must be a positive integer`);
+  }
+
+  return value;
+}
+
 export function getConfig() {
   ensureLocalEnvLoaded();
 
@@ -78,6 +95,18 @@ export function getConfig() {
     apiKeyPepper: readRequired("REFHUB_API_KEY_PEPPER"),
     appBaseUrl: process.env.REFHUB_APP_BASE_URL || null,
     semanticScholarApiKey: process.env.SEMANTIC_SCHOLAR_API_KEY || null,
+    semanticScholarRateLimitMaxRequests: readPositiveInteger(
+      "SEMANTIC_SCHOLAR_RATE_LIMIT_MAX_REQUESTS",
+      DEFAULT_SEMANTIC_SCHOLAR_RATE_LIMIT_MAX_REQUESTS,
+    ),
+    semanticScholarRateLimitWindowMs: readPositiveInteger(
+      "SEMANTIC_SCHOLAR_RATE_LIMIT_WINDOW_MS",
+      DEFAULT_SEMANTIC_SCHOLAR_RATE_LIMIT_WINDOW_MS,
+    ),
+    semanticScholarTimeoutMs: readPositiveInteger(
+      "SEMANTIC_SCHOLAR_TIMEOUT_MS",
+      DEFAULT_SEMANTIC_SCHOLAR_TIMEOUT_MS,
+    ),
     googleDriveClientId: process.env.GOOGLE_DRIVE_CLIENT_ID || null,
     googleDriveClientSecret: process.env.GOOGLE_DRIVE_CLIENT_SECRET || null,
     googleDriveRedirectUri: process.env.GOOGLE_DRIVE_REDIRECT_URI || null,

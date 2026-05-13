@@ -140,8 +140,6 @@ const VAULT_PUBLICATION_SELECT = [
 ].join(", ");
 const SEMANTIC_SCHOLAR_CACHE_TTL_MS = 60 * 1000;
 const SEMANTIC_SCHOLAR_CACHE_STALE_TTL_MS = 10 * 60 * 1000;
-const SEMANTIC_SCHOLAR_RATE_LIMIT_WINDOW_MS = 60 * 1000;
-const SEMANTIC_SCHOLAR_RATE_LIMIT_MAX_REQUESTS = 12;
 const semanticScholarResponseCache = new Map();
 const semanticScholarRateLimitBuckets = new Map();
 
@@ -186,20 +184,22 @@ function pruneSemanticScholarState(now = Date.now()) {
   }
 }
 
-function takeSemanticScholarRateLimit(userId, now = Date.now()) {
+function takeSemanticScholarRateLimit(userId, config = getConfig(), now = Date.now()) {
   pruneSemanticScholarState(now);
 
+  const windowMs = config.semanticScholarRateLimitWindowMs;
+  const maxRequests = config.semanticScholarRateLimitMaxRequests;
   const bucketKey = userId || "anonymous";
   const existing = semanticScholarRateLimitBuckets.get(bucketKey);
   if (!existing || existing.resetAt <= now) {
     semanticScholarRateLimitBuckets.set(bucketKey, {
       count: 1,
-      resetAt: now + SEMANTIC_SCHOLAR_RATE_LIMIT_WINDOW_MS,
+      resetAt: now + windowMs,
     });
     return { allowed: true };
   }
 
-  if (existing.count >= SEMANTIC_SCHOLAR_RATE_LIMIT_MAX_REQUESTS) {
+  if (existing.count >= maxRequests) {
     return {
       allowed: false,
       retryAfterSeconds: Math.max(1, Math.ceil((existing.resetAt - now) / 1000)),
@@ -289,7 +289,8 @@ async function handleSemanticScholarPaperRoute(context, event, principal, routeN
   const papers = cached.hit
     ? await cached.value
     : await (async () => {
-      const rateLimit = takeSemanticScholarRateLimit(principal?.userId);
+      const config = getConfig();
+      const rateLimit = takeSemanticScholarRateLimit(principal?.userId, config);
       if (!rateLimit.allowed) {
         return json(
           429,
@@ -311,11 +312,10 @@ async function handleSemanticScholarPaperRoute(context, event, principal, routeN
         );
       }
 
-      const { semanticScholarApiKey } = getConfig();
-      const timeout = AbortSignal.timeout(8000);
+      const timeout = AbortSignal.timeout(config.semanticScholarTimeoutMs);
       return getCachedSemanticScholarResponse(cacheKey, () =>
         fetcher({
-          apiKey: semanticScholarApiKey,
+          apiKey: config.semanticScholarApiKey,
           seedPaperId,
           limit,
           signal: timeout,
@@ -699,7 +699,8 @@ async function handlePaperLookup(context, event, principal) {
   const paperId = cached.hit
     ? await cached.value
     : await (async () => {
-      const rateLimit = takeSemanticScholarRateLimit(principal?.userId);
+      const config = getConfig();
+      const rateLimit = takeSemanticScholarRateLimit(principal?.userId, config);
       if (!rateLimit.allowed) {
         return json(
           429,
@@ -721,12 +722,11 @@ async function handlePaperLookup(context, event, principal) {
         );
       }
 
-      const { semanticScholarApiKey } = getConfig();
-      const timeout = AbortSignal.timeout(8000);
+      const timeout = AbortSignal.timeout(config.semanticScholarTimeoutMs);
       try {
         return await getCachedSemanticScholarResponse(cacheKey, () =>
           fetchSemanticScholarPaperLookup({
-            apiKey: semanticScholarApiKey,
+            apiKey: config.semanticScholarApiKey,
             queryType,
             queryValue,
             signal: timeout,
@@ -764,8 +764,8 @@ async function handleSemanticScholarDoiMetadataRoute(context, event, principal) 
   // Semantic Scholar is disabled when no API key is configured. Without a key
   // the unauthenticated rate limit (1 req/s shared) is hit almost immediately.
   // Set SEMANTIC_SCHOLAR_API_KEY in the environment to re-enable this route.
-  const { semanticScholarApiKey } = getConfig();
-  if (!semanticScholarApiKey) {
+  const config = getConfig();
+  if (!config.semanticScholarApiKey) {
     return errorResponse(503, "semantic_scholar_disabled", "Semantic Scholar metadata enrichment is not configured on this server.", context.requestId);
   }
 
@@ -785,7 +785,7 @@ async function handleSemanticScholarDoiMetadataRoute(context, event, principal) 
   const metadata = cached.hit
     ? await cached.value
     : await (async () => {
-      const rateLimit = takeSemanticScholarRateLimit(principal?.userId);
+      const rateLimit = takeSemanticScholarRateLimit(principal?.userId, config);
       if (!rateLimit.allowed) {
         return json(
           429,
@@ -807,10 +807,10 @@ async function handleSemanticScholarDoiMetadataRoute(context, event, principal) 
         );
       }
 
-      const timeout = AbortSignal.timeout(8000);
+      const timeout = AbortSignal.timeout(config.semanticScholarTimeoutMs);
       return getCachedSemanticScholarResponse(cacheKey, () =>
         fetchSemanticScholarDoiMetadata({
-          apiKey: semanticScholarApiKey,
+          apiKey: config.semanticScholarApiKey,
           doi,
           signal: timeout,
         })

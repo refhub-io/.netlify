@@ -821,19 +821,69 @@ async function uploadDriveFile(accessToken, folderId, filename, pdfBuffer) {
 }
 
 async function upsertPdfAssetRecord(supabase, record) {
-  const result = await supabase
-    .from("publication_pdf_assets")
-    .upsert(record, {
-      onConflict: "vault_publication_id,storage_provider",
-    })
-    .select("*")
-    .single();
+  // Vault-level records have a full unique constraint on (vault_publication_id, storage_provider)
+  // and can use the standard upsert path.
+  if (record.vault_publication_id) {
+    const result = await supabase
+      .from("publication_pdf_assets")
+      .upsert(record, { onConflict: "vault_publication_id,storage_provider" })
+      .select("*")
+      .single();
 
-  if (result.error) {
-    throw result.error;
+    if (result.error) throw result.error;
+    return result.data;
   }
 
-  return result.data;
+  // Publication-level records use a partial unique index
+  // (publication_id, storage_provider) WHERE vault_publication_id IS NULL.
+  // PostgREST can't reference partial indexes by column names in ON CONFLICT,
+  // so we do a manual select → update/insert instead.
+  const { data: existing, error: selectError } = await supabase
+    .from("publication_pdf_assets")
+    .select("id")
+    .eq("publication_id", record.publication_id)
+    .eq("storage_provider", record.storage_provider)
+    .is("vault_publication_id", null)
+    .maybeSingle();
+
+  if (selectError) throw selectError;
+
+  if (existing) {
+    const { data, error } = await supabase
+      .from("publication_pdf_assets")
+      .update(record)
+      .eq("id", existing.id)
+      .select("*")
+      .single();
+    if (error) throw error;
+    return data;
+  }
+
+  const { data, error } = await supabase
+    .from("publication_pdf_assets")
+    .insert(record)
+    .select("*")
+    .single();
+  if (error) throw error;
+  return data;
+}
+
+async function upsertPublicationLevelPdfAssetRecord(supabase, record) {
+  if (!record.publication_id) {
+    return null;
+  }
+
+  return upsertPdfAssetRecord(supabase, {
+    ...record,
+    vault_publication_id: null,
+  });
+}
+
+async function upsertVaultAndPublicationPdfAssetRecords(supabase, record) {
+  const vaultRecord = await upsertPdfAssetRecord(supabase, record);
+  const publicationRecord = await upsertPublicationLevelPdfAssetRecord(supabase, record);
+
+  return { vaultRecord, publicationRecord };
 }
 
 async function resolveOpenAccessPdfUrl(doi, fallbackUrl) {
@@ -957,7 +1007,7 @@ export async function uploadPdfToGoogleDriveForUser({
     const uploaded = await uploadDriveFile(accessToken, folder.folderId, filename, pdfBuffer);
     console.log("[drive] uploaded to Drive", { fileId: uploaded.id, filename, webViewLink: uploaded.webViewLink });
 
-    await upsertPdfAssetRecord(supabase, {
+    await upsertVaultAndPublicationPdfAssetRecords(supabase, {
       user_id: userId,
       publication_id: publicationId,
       vault_publication_id: vaultPublicationId,
@@ -982,7 +1032,7 @@ export async function uploadPdfToGoogleDriveForUser({
   } catch (error) {
     console.error("[drive] upload failed", { userId, sourceUrl, code: error.code, message: error.message });
 
-    await upsertPdfAssetRecord(supabase, {
+    await upsertVaultAndPublicationPdfAssetRecords(supabase, {
       user_id: userId,
       publication_id: publicationId,
       vault_publication_id: vaultPublicationId,
@@ -1062,7 +1112,7 @@ export async function recordBrowserDriveUpload(supabase, {
   webViewLink,
   sourceUrl,
 }) {
-  await upsertPdfAssetRecord(supabase, {
+  await upsertVaultAndPublicationPdfAssetRecords(supabase, {
     user_id: userId,
     publication_id: publicationId,
     vault_publication_id: vaultPublicationId,

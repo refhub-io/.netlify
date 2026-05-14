@@ -1818,6 +1818,7 @@ export async function handler(event) {
       route[0] === "references" ||
       route[0] === "citations" ||
       route[0] === "lookup" ||
+      route[0] === "doi-metadata" ||
       route[0] === "google-drive" ||
       route[0] === "publications" ||
       route[0] === "audit";
@@ -1976,8 +1977,6 @@ export async function handler(event) {
       } else if (route.length === 3 && route[0] === "vaults" && route[2] === "audit" && event.httpMethod === "GET") {
         response = await handleListVaultAudit(supabase, principal, context, route[1], event);
       // ── existing routes ─────────────────────────────────────────────────────
-      } else if (route.length === 1 && route[0] === "doi-metadata" && event.httpMethod === "POST") {
-        response = await handleSemanticScholarDoiMetadataRoute(context, event, principal);
       } else if (route.length === 1 && route[0] === "pdf-metadata" && event.httpMethod === "POST") {
         response = await handlePdfMetadataRoute(context, event, principal);
       } else if (route.length === 3 && route[0] === "vaults" && route[2] === "items" && event.httpMethod === "POST") {

@@ -18,9 +18,11 @@ DELETE /api/v1/keys/:keyId
 POST   /api/v1/recommendations     ← semantic scholar (jwt only)
 POST   /api/v1/references          ← semantic scholar (jwt only)
 POST   /api/v1/citations           ← semantic scholar (jwt only)
+POST   /api/v1/doi-metadata        ← semantic scholar (jwt only)
 GET    /api/v1/audit
 POST   /api/v1/lookup
 GET/POST/DELETE /api/v1/google-drive
+POST   /api/v1/publications/:publicationId/pdf  ← upload pdf to drive (jwt only)
 ```
 
 ### data routes — `rhk_...` api key
@@ -281,6 +283,66 @@ response shape (recommendations · references · citations):
 ```
 
 `POST /api/v1/citations` — same request/response shape as references; returns papers citing the seed paper.
+
+### `POST /api/v1/doi-metadata`
+
+auth: supabase session jwt only — api keys explicitly rejected.
+
+resolves a DOI against semantic scholar and returns structured metadata. applies per-user rate limiting; may return `429 rate_limit_exceeded`. results cached briefly in-process.
+
+```json
+{ "doi": "10.1145/3544548.3580907" }
+```
+
+- `doi` required — bare doi string (no `https://doi.org/` prefix)
+
+```json
+{
+  "data": {
+    "title": "example paper",
+    "authors": ["author one", "author two"],
+    "year": 2023,
+    "journal": "CHI",
+    "doi": "10.1145/3544548.3580907",
+    "url": "https://doi.org/10.1145/3544548.3580907",
+    "abstract": "...",
+    "type": "inproceedings"
+  },
+  "meta": { "request_id": "uuid", "doi": "10.1145/3544548.3580907" }
+}
+```
+
+`data` is `null` when the DOI is not found in semantic scholar. `type` is one of `article` · `inproceedings` · `book` · `thesis` · `report`.
+
+### `POST /api/v1/publications/:publicationId/pdf`
+
+auth: supabase session jwt only. uploads a PDF for a publication the authenticated user owns and stores it in their linked Google Drive. records the asset in `publication_pdf_assets`.
+
+request body: raw `application/pdf` bytes.
+
+- publication must be owned by the authenticated user
+- google drive must be linked for the account
+- file size capped at `GOOGLE_DRIVE_MAX_UPLOAD_BYTES` (default 26 MB)
+
+```json
+{
+  "data": {
+    "attempted": true,
+    "stored": true,
+    "provider": "google_drive",
+    "fileId": "1BcnjrInjOGsnM142vNlg4KNMriooAc9u",
+    "folderId": "1-HxdtCdUxv03KEN-syenBc18fvnRl9EW",
+    "folderName": "refhub",
+    "pdfUrl": "https://drive.google.com/file/d/.../view?usp=drivesdk",
+    "sourceUrl": null
+  },
+  "meta": { "request_id": "uuid" }
+}
+```
+
+errors: `404 publication_not_found` · `503 drive_not_linked` · `502 drive_upload_failed`.
+
+**requires migration** `20260513000000_publication_pdf_assets_library_uploads.sql` — drops the NOT NULL constraint on `vault_publication_id` and adds the partial unique index `(publication_id, storage_provider) WHERE publication_id IS NOT NULL AND vault_publication_id IS NULL`.
 
 ### `GET /api/v1/vaults`
 

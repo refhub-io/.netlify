@@ -174,6 +174,7 @@ export function isValidApiKeyScope(scope) {
 }
 
 export function requireScope(principal, scope) {
+  if (principal.authType === "management_user") return true;
   return principal.scopes.has(scope);
 }
 

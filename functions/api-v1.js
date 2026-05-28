@@ -98,7 +98,7 @@ function toSafeErrorResponse(error, requestId) {
 
   if (["semantic_scholar_rate_limited", "semantic_scholar_error", "semantic_scholar_timeout", "semantic_scholar_unreachable"]
     .includes(error?.code)) {
-    return errorResponse(error.status || 502, error.code, error.message, requestId);
+    return errorResponse(error.status || 502, error.code, error.message, requestId, error.details);
   }
 
   return errorResponse(500, "internal_error", "Unexpected server error", requestId);

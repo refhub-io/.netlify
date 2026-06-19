@@ -10,19 +10,30 @@ versioned api backend for api-key access to refhub vaults. single function entry
 
 ### management routes — supabase session jwt
 
+These routes are for the logged-in RefHub frontend and reject `rhk_...` API keys.
+
 ```
 GET    /api/v1/keys
 POST   /api/v1/keys
 POST   /api/v1/keys/:keyId/revoke
 DELETE /api/v1/keys/:keyId
-POST   /api/v1/recommendations     ← semantic scholar (jwt only)
-POST   /api/v1/references          ← semantic scholar (jwt only)
-POST   /api/v1/citations           ← semantic scholar (jwt only)
-POST   /api/v1/doi-metadata        ← semantic scholar (jwt only)
+
+POST   /api/v1/recommendations       ← semantic scholar similar papers
+POST   /api/v1/references            ← semantic scholar cited papers
+POST   /api/v1/citations             ← semantic scholar citing papers
+POST   /api/v1/lookup                ← semantic scholar DOI/title → paper id
+POST   /api/v1/doi-metadata          ← semantic scholar DOI metadata enrichment
+POST   /api/v1/search                ← semantic scholar topic/paper search
+
+GET    /api/v1/google-drive
+POST   /api/v1/google-drive/connect
+POST   /api/v1/google-drive/folder
+DELETE /api/v1/google-drive
+GET    /api/v1/google-drive/callback  ← oauth callback, no bearer token
+POST   /api/v1/google-drive/vaults/:vaultId/items/:itemId/pdf
+POST   /api/v1/publications/:publicationId/pdf
+
 GET    /api/v1/audit
-POST   /api/v1/lookup
-GET/POST/DELETE /api/v1/google-drive
-POST   /api/v1/publications/:publicationId/pdf  ← upload pdf to drive (jwt only)
 ```
 
 ### data routes — `rhk_...` api key
@@ -44,6 +55,9 @@ PATCH  /api/v1/vaults/:vaultId/items/:itemId
 DELETE /api/v1/vaults/:vaultId/items/:itemId
 POST   /api/v1/vaults/:vaultId/items/upsert
 POST   /api/v1/vaults/:vaultId/items/import-preview
+POST   /api/v1/vaults/:vaultId/items/:itemId/pdf
+POST   /api/v1/vaults/:vaultId/items/:itemId/pdf/session
+POST   /api/v1/vaults/:vaultId/items/:itemId/pdf/complete
 GET    /api/v1/vaults/:vaultId/tags
 POST   /api/v1/vaults/:vaultId/tags
 PATCH  /api/v1/vaults/:vaultId/tags/:tagId
@@ -62,6 +76,8 @@ GET    /api/v1/vaults/:vaultId/stats
 GET    /api/v1/vaults/:vaultId/changes
 GET    /api/v1/vaults/:vaultId/export
 GET    /api/v1/vaults/:vaultId/audit
+GET    /api/v1/extension/google-drive-status
+POST   /api/v1/pdf-metadata
 ```
 
 ---
@@ -77,6 +93,10 @@ GET    /api/v1/vaults/:vaultId/audit
     config.js          ← required env vars and runtime knobs
     export.js          ← json and bibtex export helpers
     http.js            ← shared http/error/json helpers
+    google-drive.js    ← google oauth, drive folder, pdf upload helpers
+    semantic-scholar.js← semantic scholar proxy normalization/helpers
+    bibtex.js          ← bibtex parsing/serialization helpers
+    routes/            ← v2 vaults/items/tags/relations/search/import/audit handlers
   netlify.toml         ← redirects and function settings
   package.json
 ```
@@ -284,6 +304,44 @@ response shape (recommendations · references · citations):
 
 `POST /api/v1/citations` — same request/response shape as references; returns papers citing the seed paper.
 
+### `POST /api/v1/lookup`
+
+auth: supabase session jwt only — api keys explicitly rejected.
+
+resolves a DOI or title to a Semantic Scholar paper id. DOI lookups are normalized to `DOI:<doi>` locally; title lookups proxy Semantic Scholar paper search.
+
+```json
+{ "doi": "10.1145/3544548.3580907" }
+```
+
+```json
+{ "title": "attention is all you need" }
+```
+
+response:
+
+```json
+{
+  "data": { "paper_id": "DOI:10.1145/3544548.3580907" },
+  "meta": { "request_id": "uuid", "query_type": "doi" }
+}
+```
+
+### `POST /api/v1/search`
+
+auth: supabase session jwt only — api keys explicitly rejected.
+
+server-side Semantic Scholar topic/paper search for empty-vault discovery. Uses Semantic Scholar `/graph/v1/paper/search/bulk` with compact paper fields and `citationCount:desc` sorting. Applies the same per-user Semantic Scholar rate limit, timeout, cache, stale-cache fallback on upstream 429, and sanitized error shape as the other Semantic Scholar routes.
+
+```json
+{ "query": "visual analytics provenance", "limit": 25 }
+```
+
+- `query` required, minimum 2 characters
+- `limit` optional, `1`–`25`
+- successful responses use the normalized paper shape shown above
+- `SEMANTIC_SCHOLAR_API_KEY` is optional but recommended; unauthenticated Semantic Scholar traffic uses a shared public pool and can return upstream `429`
+
 ### `POST /api/v1/doi-metadata`
 
 auth: supabase session jwt only — api keys explicitly rejected.
@@ -313,6 +371,27 @@ resolves a DOI against semantic scholar and returns structured metadata. applies
 ```
 
 `data` is `null` when the DOI is not found in semantic scholar. `type` is one of `article` · `inproceedings` · `book` · `thesis` · `report`.
+
+### Google Drive routes
+
+auth: supabase session jwt only unless noted.
+
+- `GET /api/v1/google-drive` — linked status, folder status, folder id/name.
+- `POST /api/v1/google-drive/connect` — returns a Google OAuth `authorization_url`; accepts optional `return_to`.
+- `GET /api/v1/google-drive/callback` — OAuth callback target, no bearer token; redirects back to the configured RefHub UI.
+- `POST /api/v1/google-drive/folder` — ensure/recreate the managed Drive folder.
+- `DELETE /api/v1/google-drive` — disconnect stored Drive credentials and best-effort revoke the refresh token.
+- `GET /api/v1/extension/google-drive-status` — compact status shape for the browser extension/data route auth path.
+
+### PDF metadata and upload routes
+
+`POST /api/v1/pdf-metadata` accepts `{ "source_url": "https://...pdf" }` plus optional `cookie_header`/`referer`, fetches the PDF server-side, and returns best-effort DOI/title/authors/year/journal metadata. It returns empty metadata with a `fetch_skipped` note when the source PDF is not server-accessible instead of throwing a hard 500.
+
+`POST /api/v1/vaults/:vaultId/items/:itemId/pdf` uploads or fetches a PDF for a vault item and stores it in linked Google Drive. Body can be raw `application/pdf` bytes or JSON with `source_url` plus optional `cookie_header`/`referer`.
+
+`POST /api/v1/vaults/:vaultId/items/:itemId/pdf/session` creates a browser-side Google Drive resumable upload session.
+
+`POST /api/v1/vaults/:vaultId/items/:itemId/pdf/complete` records a browser-completed Drive upload. Body must include `file_id`; `web_view_link` and `source_url` are optional.
 
 ### `POST /api/v1/publications/:publicationId/pdf`
 
@@ -367,6 +446,17 @@ scope: `vaults:read`. returns vaults accessible through ownership or explicit sh
 ### `GET /api/v1/vaults/:vaultId`
 
 scope: `vaults:read`. returns vault metadata + `vault_publications` + vault-scoped `tags` + `publication_tags` + `publication_relations`.
+
+### V2 vault and organization routes
+
+`POST /api/v1/vaults`, `PATCH /api/v1/vaults/:vaultId`, `DELETE /api/v1/vaults/:vaultId`, `PATCH /api/v1/vaults/:vaultId/visibility`, and `/shares` routes require `vaults:admin` or an authenticated management user with owner/admin access.
+
+Tag, relation, search, stats, changes, import, and audit routes are implemented under `src/routes/*`. They use the same vault access resolver and scope model:
+
+- read/search/stats/changes/audit: `vaults:read`
+- add/update/delete items, tags, relations, imports: `vaults:write`
+- export: `vaults:export`
+- vault CRUD/visibility/shares: `vaults:admin`
 
 ### `POST /api/v1/vaults/:vaultId/items`
 

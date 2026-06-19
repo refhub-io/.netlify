@@ -1474,13 +1474,26 @@ export async function handler(event) {
       }
     }
   } catch (error) {
-    console.error("Unhandled RefHub API error", {
+    const isExpectedSemanticScholarError = [
+      "semantic_scholar_rate_limited",
+      "semantic_scholar_error",
+      "semantic_scholar_timeout",
+      "semantic_scholar_unreachable",
+    ].includes(error?.code);
+    const logPayload = {
       requestId: context.requestId,
       path: context.path,
       method: context.method,
       code: error?.code,
       message: error?.message,
-    });
+    };
+
+    if (isExpectedSemanticScholarError) {
+      console.warn("RefHub upstream Semantic Scholar error", logPayload);
+    } else {
+      console.error("Unhandled RefHub API error", logPayload);
+    }
+
     response = toSafeErrorResponse(error, context.requestId);
   }
 

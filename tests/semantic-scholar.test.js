@@ -49,7 +49,7 @@ describe("semantic-scholar upstream errors", () => {
     });
   });
 
-  it("searches and normalizes Semantic Scholar papers", async () => {
+  it("searches and normalizes Semantic Scholar papers through the bulk endpoint", async () => {
     vi.mocked(fetch).mockResolvedValue(
       new Response(JSON.stringify({
         data: [
@@ -78,6 +78,9 @@ describe("semantic-scholar upstream errors", () => {
         open_access_pdf_url: "https://example.test/paper.pdf",
       }),
     ]);
+    const url = new URL(vi.mocked(fetch).mock.calls[0][0].toString());
+    expect(url.pathname).toBe("/graph/v1/paper/search/bulk");
+    expect(url.searchParams.get("sort")).toBe("citationCount:desc");
   });
 
   it("still returns null for DOI metadata misses", async () => {

@@ -436,10 +436,11 @@ export async function fetchSemanticScholarSearch({ apiKey, query, limit, signal 
     headers["x-api-key"] = apiKey;
   }
 
-  const url = new URL("https://api.semanticscholar.org/graph/v1/paper/search");
+  const url = new URL("https://api.semanticscholar.org/graph/v1/paper/search/bulk");
   url.searchParams.set("query", query);
   url.searchParams.set("fields", SEMANTIC_SCHOLAR_PAPER_FIELDS.join(","));
   url.searchParams.set("limit", String(limit));
+  url.searchParams.set("sort", "citationCount:desc");
 
   const response = await requestSemanticScholar(url, {
     method: "GET",

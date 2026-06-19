@@ -27,10 +27,12 @@ import {
   fetchSemanticScholarPaperLookup,
   fetchSemanticScholarRecommendations,
   fetchSemanticScholarReferences,
+  fetchSemanticScholarSearch,
   isRefHubApiKeyValue,
   normalizePaperListRequest,
   normalizePaperLookupRequest,
   normalizeSemanticScholarDoiRequest,
+  normalizeSemanticScholarSearchRequest,
 } from "../src/semantic-scholar.js";
 
 const PUBLICATION_FIELDS = [
@@ -684,6 +686,80 @@ async function handlePaperLookup(context, event, principal) {
     },
   });
 }
+async function handleSemanticScholarSearchRoute(context, event, principal) {
+  const parsedBody = parseJsonBody(event);
+  if (!parsedBody.ok) {
+    return errorResponse(400, "invalid_json", "Request body must be valid JSON", context.requestId);
+  }
+
+  const normalizedRequest = normalizeSemanticScholarSearchRequest(parsedBody.value || {});
+  if (normalizedRequest.error) {
+    return errorResponse(400, normalizedRequest.error, normalizedRequest.message, context.requestId);
+  }
+
+  const { query, limit } = normalizedRequest.value;
+  const cacheKey = `search:${query.toLowerCase()}:${limit}`;
+  const cached = getCachedSemanticScholarValue(cacheKey);
+  const papers = cached.hit
+    ? await cached.value
+    : await (async () => {
+      const rateLimit = takeSemanticScholarRateLimit(principal?.userId);
+      if (!rateLimit.allowed) {
+        return json(
+          429,
+          {
+            error: {
+              code: "rate_limit_exceeded",
+              message: "Too many Semantic Scholar requests; please retry shortly",
+              details: {
+                retry_after_seconds: rateLimit.retryAfterSeconds,
+              },
+            },
+            meta: {
+              request_id: context.requestId,
+            },
+          },
+          {
+            "retry-after": String(rateLimit.retryAfterSeconds),
+          },
+        );
+      }
+
+      const { semanticScholarApiKey } = getConfig();
+      const timeout = AbortSignal.timeout(8000);
+      try {
+        return await getCachedSemanticScholarResponse(cacheKey, () =>
+          fetchSemanticScholarSearch({
+            apiKey: semanticScholarApiKey,
+            query,
+            limit,
+            signal: timeout,
+          })
+        );
+      } catch (error) {
+        const stale = getStaleSemanticScholarValue(cacheKey);
+        if (error?.code === "semantic_scholar_rate_limited" && stale.hit) {
+          return stale.value;
+        }
+
+        throw error;
+      }
+    })();
+
+  if (papers?.statusCode) {
+    return papers;
+  }
+
+  return json(200, {
+    data: papers,
+    meta: {
+      request_id: context.requestId,
+      query,
+      limit,
+    },
+  });
+}
+
 async function handleSemanticScholarDoiMetadataRoute(context, event, principal) {
   const parsedBody = parseJsonBody(event);
   if (!parsedBody.ok) {
@@ -1312,7 +1388,7 @@ export async function handler(event) {
 
     const route = getRouteSegments(event.path || "/");
     const isManagementRoute =
-      route[0] === "keys" || route[0] === "recommendations" || route[0] === "references" || route[0] === "citations" || route[0] === "lookup" || route[0] === "doi-metadata";
+      route[0] === "keys" || route[0] === "recommendations" || route[0] === "references" || route[0] === "citations" || route[0] === "lookup" || route[0] === "doi-metadata" || route[0] === "search";
 
     if (isManagementRoute) {
       const authorization = event.headers?.authorization || event.headers?.Authorization || null;
@@ -1360,6 +1436,8 @@ export async function handler(event) {
         response = await handlePaperLookup(context, event, principal);
       } else if (route.length === 1 && route[0] === "doi-metadata" && event.httpMethod === "POST") {
         response = await handleSemanticScholarDoiMetadataRoute(context, event, principal);
+      } else if (route.length === 1 && route[0] === "search" && event.httpMethod === "POST") {
+        response = await handleSemanticScholarSearchRoute(context, event, principal);
       } else if (route.length === 2 && route[0] === "keys" && event.httpMethod === "DELETE") {
         response = await handleRevokeApiKey(supabase, principal, context, route[1]);
       } else if (route.length === 3 && route[0] === "keys" && route[2] === "revoke" && event.httpMethod === "POST") {

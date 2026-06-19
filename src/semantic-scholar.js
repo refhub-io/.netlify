@@ -1,5 +1,8 @@
 const DEFAULT_PAPER_LIST_LIMIT = 10;
 const MAX_PAPER_LIST_LIMIT = 25;
+const DEFAULT_SEARCH_LIMIT = 10;
+const MAX_SEARCH_LIMIT = 25;
+const MIN_SEARCH_QUERY_LENGTH = 2;
 const SEMANTIC_SCHOLAR_LOOKUP_FIELDS = ["paperId"];
 const SEMANTIC_SCHOLAR_PAPER_FIELDS = [
   "paperId",
@@ -232,6 +235,41 @@ export function normalizeSemanticScholarDoiRequest(body) {
   };
 }
 
+export function normalizeSemanticScholarSearchRequest(body) {
+  const query = typeof body?.query === "string" ? body.query.trim() : "";
+
+  if (query.length < MIN_SEARCH_QUERY_LENGTH) {
+    return {
+      error: "invalid_query",
+      message: `Body must include a query string with at least ${MIN_SEARCH_QUERY_LENGTH} characters`,
+    };
+  }
+
+  const rawLimit = body?.limit;
+  if (rawLimit === undefined || rawLimit === null || rawLimit === "") {
+    return {
+      value: {
+        query,
+        limit: DEFAULT_SEARCH_LIMIT,
+      },
+    };
+  }
+
+  if (!Number.isInteger(rawLimit) || rawLimit < 1 || rawLimit > MAX_SEARCH_LIMIT) {
+    return {
+      error: "invalid_limit",
+      message: `limit must be an integer between 1 and ${MAX_SEARCH_LIMIT}`,
+    };
+  }
+
+  return {
+    value: {
+      query,
+      limit: rawLimit,
+    },
+  };
+}
+
 async function fetchSemanticScholarPaperList({
   apiKey,
   seedPaperId,
@@ -387,6 +425,36 @@ export async function fetchSemanticScholarPaperLookup({ apiKey, queryType, query
         : null;
 
   return typeof paperId === "string" && paperId.trim() ? paperId : null;
+}
+
+export async function fetchSemanticScholarSearch({ apiKey, query, limit, signal }) {
+  const headers = {
+    accept: "application/json",
+  };
+
+  if (apiKey) {
+    headers["x-api-key"] = apiKey;
+  }
+
+  const url = new URL("https://api.semanticscholar.org/graph/v1/paper/search");
+  url.searchParams.set("query", query);
+  url.searchParams.set("fields", SEMANTIC_SCHOLAR_PAPER_FIELDS.join(","));
+  url.searchParams.set("limit", String(limit));
+
+  const response = await requestSemanticScholar(url, {
+    method: "GET",
+    headers,
+    signal,
+  });
+  assertSuccessfulSemanticScholarResponse(response, {
+    code: "semantic_scholar_search_failed",
+    message: "Semantic Scholar search failed",
+    status: 502,
+  });
+
+  const payload = await response.json();
+  const papers = Array.isArray(payload?.data) ? payload.data : [];
+  return limitNormalizedPapers(papers.map(normalizePaper), limit);
 }
 
 export async function fetchSemanticScholarDoiMetadata({ apiKey, doi, signal }) {

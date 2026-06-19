@@ -3,6 +3,8 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   fetchSemanticScholarDoiMetadata,
   fetchSemanticScholarRecommendations,
+  fetchSemanticScholarSearch,
+  normalizeSemanticScholarSearchRequest,
 } from "../src/semantic-scholar.js";
 
 describe("semantic-scholar upstream errors", () => {
@@ -33,6 +35,49 @@ describe("semantic-scholar upstream errors", () => {
         retry_after_seconds: 17,
       },
     });
+  });
+
+  it("validates topic search requests", () => {
+    expect(normalizeSemanticScholarSearchRequest({ query: "ai", limit: 5 })).toEqual({
+      value: { query: "ai", limit: 5 },
+    });
+    expect(normalizeSemanticScholarSearchRequest({ query: "x" })).toMatchObject({
+      error: "invalid_query",
+    });
+    expect(normalizeSemanticScholarSearchRequest({ query: "visualization", limit: 50 })).toMatchObject({
+      error: "invalid_limit",
+    });
+  });
+
+  it("searches and normalizes Semantic Scholar papers", async () => {
+    vi.mocked(fetch).mockResolvedValue(
+      new Response(JSON.stringify({
+        data: [
+          {
+            paperId: "paper-1",
+            title: "Useful Paper",
+            year: 2024,
+            venue: "CHI",
+            citationCount: 7,
+            externalIds: { DOI: "10.123/example" },
+            authors: [{ authorId: "a1", name: "Ada" }],
+            openAccessPdf: { url: "https://example.test/paper.pdf" },
+          },
+        ],
+      }), { status: 200 }),
+    );
+
+    await expect(
+      fetchSemanticScholarSearch({ apiKey: "test-key", query: "visual analytics", limit: 10 }),
+    ).resolves.toEqual([
+      expect.objectContaining({
+        paper_id: "paper-1",
+        title: "Useful Paper",
+        external_ids: { DOI: "10.123/example" },
+        authors: [{ author_id: "a1", name: "Ada" }],
+        open_access_pdf_url: "https://example.test/paper.pdf",
+      }),
+    ]);
   });
 
   it("still returns null for DOI metadata misses", async () => {

@@ -3,6 +3,7 @@ import {
   authenticateApiKey,
   authenticateManagementUser,
   createApiKeySecret,
+  getSupabaseAdmin,
   hashManagedApiKey,
   isValidApiKeyScope,
   requireScope,
@@ -10,6 +11,18 @@ import {
 } from "../src/auth.js";
 import { getConfig } from "../src/config.js";
 import { serializeVaultExport } from "../src/export.js";
+import {
+  completeGoogleDriveLink,
+  createDriveResumableSession,
+  createGoogleDriveAuthorizationUrl,
+  disconnectGoogleDriveForUser,
+  ensureGoogleDriveFolderForUser,
+  extractPdfMetadataFromBuffer,
+  fetchPdfSourceBuffer,
+  getGoogleDriveStatus,
+  recordBrowserDriveUpload,
+  uploadPdfToGoogleDriveForUser,
+} from "../src/google-drive.js";
 import {
   createCorsHeaders,
   createRequestContext,
@@ -34,6 +47,51 @@ import {
   normalizeSemanticScholarDoiRequest,
   normalizeSemanticScholarSearchRequest,
 } from "../src/semantic-scholar.js";
+
+// ── V2 route modules ──────────────────────────────────────────────────────────
+import {
+  handleCreateVault,
+  handleUpdateVault,
+  handleDeleteVault,
+  handleUpdateVaultVisibility,
+  handleListVaultShares,
+  handleCreateVaultShare,
+  handleUpdateVaultShare,
+  handleDeleteVaultShare,
+} from "../src/routes/vaults.js";
+import {
+  handleListTags,
+  handleCreateTag,
+  handleUpdateTag,
+  handleDeleteTag,
+  handleAttachTags,
+  handleDetachTags,
+} from "../src/routes/tags.js";
+import {
+  handleListRelations,
+  handleCreateRelation,
+  handleUpdateRelation,
+  handleDeleteRelation,
+} from "../src/routes/relations.js";
+import {
+  handleSearchItems,
+  handleGetVaultStats,
+  handleGetVaultChanges,
+} from "../src/routes/search.js";
+import {
+  handleDeleteItem,
+  handleBulkUpsertItems,
+  handleImportPreview,
+} from "../src/routes/items.js";
+import {
+  handleImportDoi,
+  handleImportBibtex,
+  handleImportUrl,
+} from "../src/routes/import.js";
+import {
+  handleListVaultAudit,
+  handleListGlobalAudit,
+} from "../src/routes/audit.js";
 
 const PUBLICATION_FIELDS = [
   "title",
@@ -84,12 +142,20 @@ const VAULT_PUBLICATION_SELECT = [
 ].join(", ");
 const SEMANTIC_SCHOLAR_CACHE_TTL_MS = 60 * 1000;
 const SEMANTIC_SCHOLAR_CACHE_STALE_TTL_MS = 10 * 60 * 1000;
-const SEMANTIC_SCHOLAR_RATE_LIMIT_WINDOW_MS = 60 * 1000;
-const SEMANTIC_SCHOLAR_RATE_LIMIT_MAX_REQUESTS = 12;
 const semanticScholarResponseCache = new Map();
 const semanticScholarRateLimitBuckets = new Map();
 
 function toSafeErrorResponse(error, requestId) {
+  if (error?.code === "google_drive_not_configured") {
+    return errorResponse(
+      error.status || 503,
+      error.code,
+      error.message,
+      requestId,
+      error.details,
+    );
+  }
+
   if (error?.code === "invalid_tag_ids") {
     return errorResponse(400, "invalid_tag_ids", error.message, requestId);
   }
@@ -120,20 +186,22 @@ function pruneSemanticScholarState(now = Date.now()) {
   }
 }
 
-function takeSemanticScholarRateLimit(userId, now = Date.now()) {
+function takeSemanticScholarRateLimit(userId, config = getConfig(), now = Date.now()) {
   pruneSemanticScholarState(now);
 
+  const windowMs = config.semanticScholarRateLimitWindowMs;
+  const maxRequests = config.semanticScholarRateLimitMaxRequests;
   const bucketKey = userId || "anonymous";
   const existing = semanticScholarRateLimitBuckets.get(bucketKey);
   if (!existing || existing.resetAt <= now) {
     semanticScholarRateLimitBuckets.set(bucketKey, {
       count: 1,
-      resetAt: now + SEMANTIC_SCHOLAR_RATE_LIMIT_WINDOW_MS,
+      resetAt: now + windowMs,
     });
     return { allowed: true };
   }
 
-  if (existing.count >= SEMANTIC_SCHOLAR_RATE_LIMIT_MAX_REQUESTS) {
+  if (existing.count >= maxRequests) {
     return {
       allowed: false,
       retryAfterSeconds: Math.max(1, Math.ceil((existing.resetAt - now) / 1000)),
@@ -223,7 +291,8 @@ async function handleSemanticScholarPaperRoute(context, event, principal, routeN
   const papers = cached.hit
     ? await cached.value
     : await (async () => {
-      const rateLimit = takeSemanticScholarRateLimit(principal?.userId);
+      const config = getConfig();
+      const rateLimit = takeSemanticScholarRateLimit(principal?.userId, config);
       if (!rateLimit.allowed) {
         return json(
           429,
@@ -245,11 +314,10 @@ async function handleSemanticScholarPaperRoute(context, event, principal, routeN
         );
       }
 
-      const { semanticScholarApiKey } = getConfig();
-      const timeout = AbortSignal.timeout(8000);
+      const timeout = AbortSignal.timeout(config.semanticScholarTimeoutMs);
       return getCachedSemanticScholarResponse(cacheKey, () =>
         fetcher({
-          apiKey: semanticScholarApiKey,
+          apiKey: config.semanticScholarApiKey,
           seedPaperId,
           limit,
           signal: timeout,
@@ -304,6 +372,10 @@ function getManagementAuthFailureMessage(code) {
   return "Bearer token authentication failed";
 }
 
+function getGoogleDriveCallbackFallbackUrl() {
+  return `${getConfig().appBaseUrl || getConfig().allowedOrigins[0] || "https://refhub.io"}/profile-edit?tab=storage`;
+}
+
 function serializeApiKeyRecord(record) {
   return {
     id: record.id,
@@ -326,7 +398,7 @@ function normalizeRequestedScopes(scopes) {
 
   const normalized = [...new Set(scopes)];
   if (normalized.some((scope) => typeof scope !== "string" || !isValidApiKeyScope(scope))) {
-    return { error: "invalid_scopes", message: "Scopes must be one of vaults:read, vaults:write, vaults:export" };
+    return { error: "invalid_scopes", message: "Scopes must be one of vaults:read, vaults:write, vaults:export, vaults:admin" };
   }
 
   return { value: normalized };
@@ -629,7 +701,8 @@ async function handlePaperLookup(context, event, principal) {
   const paperId = cached.hit
     ? await cached.value
     : await (async () => {
-      const rateLimit = takeSemanticScholarRateLimit(principal?.userId);
+      const config = getConfig();
+      const rateLimit = takeSemanticScholarRateLimit(principal?.userId, config);
       if (!rateLimit.allowed) {
         return json(
           429,
@@ -651,12 +724,11 @@ async function handlePaperLookup(context, event, principal) {
         );
       }
 
-      const { semanticScholarApiKey } = getConfig();
-      const timeout = AbortSignal.timeout(8000);
+      const timeout = AbortSignal.timeout(config.semanticScholarTimeoutMs);
       try {
         return await getCachedSemanticScholarResponse(cacheKey, () =>
           fetchSemanticScholarPaperLookup({
-            apiKey: semanticScholarApiKey,
+            apiKey: config.semanticScholarApiKey,
             queryType,
             queryValue,
             signal: timeout,
@@ -761,6 +833,18 @@ async function handleSemanticScholarSearchRoute(context, event, principal) {
 }
 
 async function handleSemanticScholarDoiMetadataRoute(context, event, principal) {
+  if (!requireScope(principal, API_SCOPES.READ)) {
+    return errorResponse(403, "missing_scope", "Scope vaults:read is required", context.requestId);
+  }
+
+  // Semantic Scholar is disabled when no API key is configured. Without a key
+  // the unauthenticated rate limit (1 req/s shared) is hit almost immediately.
+  // Set SEMANTIC_SCHOLAR_API_KEY in the environment to re-enable this route.
+  const config = getConfig();
+  if (!config.semanticScholarApiKey) {
+    return errorResponse(503, "semantic_scholar_disabled", "Semantic Scholar metadata enrichment is not configured on this server.", context.requestId);
+  }
+
   const parsedBody = parseJsonBody(event);
   if (!parsedBody.ok) {
     return errorResponse(400, "invalid_json", "Request body must be valid JSON", context.requestId);
@@ -777,7 +861,7 @@ async function handleSemanticScholarDoiMetadataRoute(context, event, principal) 
   const metadata = cached.hit
     ? await cached.value
     : await (async () => {
-      const rateLimit = takeSemanticScholarRateLimit(principal?.userId);
+      const rateLimit = takeSemanticScholarRateLimit(principal?.userId, config);
       if (!rateLimit.allowed) {
         return json(
           429,
@@ -799,11 +883,10 @@ async function handleSemanticScholarDoiMetadataRoute(context, event, principal) 
         );
       }
 
-      const { semanticScholarApiKey } = getConfig();
-      const timeout = AbortSignal.timeout(8000);
+      const timeout = AbortSignal.timeout(config.semanticScholarTimeoutMs);
       return getCachedSemanticScholarResponse(cacheKey, () =>
         fetchSemanticScholarDoiMetadata({
-          apiKey: semanticScholarApiKey,
+          apiKey: config.semanticScholarApiKey,
           doi,
           signal: timeout,
         })
@@ -819,6 +902,60 @@ async function handleSemanticScholarDoiMetadataRoute(context, event, principal) 
     meta: {
       request_id: context.requestId,
       doi,
+    },
+  });
+}
+
+async function handlePdfMetadataRoute(context, event, principal) {
+  if (!requireScope(principal, API_SCOPES.READ)) {
+    return errorResponse(403, "missing_scope", "Scope vaults:read is required", context.requestId);
+  }
+
+  const parsedBody = parseJsonBody(event);
+  if (!parsedBody.ok) {
+    return errorResponse(400, "invalid_json", "Request body must be valid JSON", context.requestId);
+  }
+
+  const sourceUrl = typeof parsedBody.value?.source_url === "string" ? parsedBody.value.source_url.trim() : "";
+  const cookieHeader = typeof parsedBody.value?.cookie_header === "string" ? parsedBody.value.cookie_header.trim() : "";
+  const referer = typeof parsedBody.value?.referer === "string" ? parsedBody.value.referer.trim() : "";
+  if (!sourceUrl) {
+    return errorResponse(400, "invalid_source_url", "Body must include a non-empty source_url", context.requestId);
+  }
+
+  let pdfBuffer;
+  try {
+    pdfBuffer = await fetchPdfSourceBuffer({
+      sourceUrl,
+      cookieHeader,
+      referer,
+      maxBytes: 10 * 1024 * 1024,
+    });
+  } catch (fetchErr) {
+    // PDF not accessible from the server (e.g. institutional IP auth, 403, etc.).
+    // Return empty metadata with a note rather than letting this throw a 500 —
+    // the extension already handles null/empty metadata gracefully.
+    console.log("[pdf-metadata] PDF fetch failed, returning empty metadata", { sourceUrl, message: fetchErr.message });
+    return json(200, {
+      data: { doi: null, title: null, authors: [], year: null, journal: null, text_excerpt: "" },
+      meta: { request_id: context.requestId, source_url: sourceUrl, fetch_skipped: true, fetch_error: fetchErr.message },
+    });
+  }
+
+  const metadata = await extractPdfMetadataFromBuffer(pdfBuffer);
+
+  return json(200, {
+    data: {
+      doi: metadata.doi || null,
+      title: metadata.title || null,
+      authors: metadata.authors || [],
+      year: metadata.year || null,
+      journal: metadata.journal || null,
+      text_excerpt: metadata.firstPageText ? metadata.firstPageText.slice(0, 2000) : "",
+    },
+    meta: {
+      request_id: context.requestId,
+      source_url: sourceUrl,
     },
   });
 }
@@ -1076,7 +1213,7 @@ async function validateVaultTagIds(supabase, vaultId, tagIds) {
 }
 
 async function handleAddItems(supabase, principal, context, vaultId, event) {
-  if (!requireScope(principal, API_SCOPES.WRITE)) {
+  if (!canWriteWithPrincipal(principal)) {
     return errorResponse(403, "missing_scope", "Scope vaults:write is required", context.requestId);
   }
 
@@ -1241,6 +1378,365 @@ async function handleAddItems(supabase, principal, context, vaultId, event) {
   });
 }
 
+function getHeader(event, name) {
+  const target = name.toLowerCase();
+  for (const [key, value] of Object.entries(event.headers || {})) {
+    if (key.toLowerCase() === target) return value;
+  }
+  return null;
+}
+
+function decodePdfRequestBuffer(event) {
+  if (!event.body) {
+    return { ok: false, status: 400, code: "missing_body", message: "Request body must be a PDF binary" };
+  }
+
+  const contentType = getHeader(event, "content-type") || "";
+  if (contentType && !/application\/pdf|application\/octet-stream/i.test(contentType)) {
+    return { ok: false, status: 415, code: "unsupported_media_type", message: "Request body must be application/pdf" };
+  }
+
+  const pdfBuffer = event.isBase64Encoded
+    ? Buffer.from(event.body, "base64")
+    : Buffer.from(event.body, "binary");
+
+  const maxBytes = getConfig().googleDriveMaxUploadBytes;
+  if (pdfBuffer.length > maxBytes) {
+    return { ok: false, status: 413, code: "pdf_too_large", message: `PDF exceeds upload limit (${maxBytes} bytes).` };
+  }
+
+  if (pdfBuffer.length < 5 || pdfBuffer[0] !== 0x25 || pdfBuffer[1] !== 0x50 || pdfBuffer[2] !== 0x44 || pdfBuffer[3] !== 0x46 || pdfBuffer[4] !== 0x2d) {
+    return { ok: false, status: 400, code: "invalid_pdf", message: "Request body does not appear to be a valid PDF" };
+  }
+
+  return { ok: true, pdfBuffer };
+}
+
+function canWriteWithPrincipal(principal) {
+  return principal.authType === "management_user" || requireScope(principal, API_SCOPES.WRITE);
+}
+
+async function handleUploadItemPdf(supabase, principal, context, event, vaultId, itemId) {
+  if (!requireScope(principal, API_SCOPES.WRITE)) {
+    return errorResponse(403, "missing_scope", "Scope vaults:write is required", context.requestId);
+  }
+
+  const access = await resolveVaultAccess(supabase, principal, vaultId, "editor");
+  if (!access.ok) {
+    return errorResponse(access.status, access.code, "Vault write access denied", context.requestId);
+  }
+
+  const { data: vaultPub, error: vpError } = await supabase
+    .from("vault_publications")
+    .select("id, original_publication_id, title, year, doi")
+    .eq("id", itemId)
+    .eq("vault_id", vaultId)
+    .single();
+
+  if (vpError || !vaultPub) {
+    return errorResponse(404, "item_not_found", "Vault item not found", context.requestId);
+  }
+
+  const contentType = event.headers?.["content-type"] || event.headers?.["Content-Type"] || "";
+  let pdfBuffer = null;
+  let sourceUrl = null;
+  let cookieHeader = null;
+  let referer = null;
+
+  if (/application\/json/i.test(contentType)) {
+    const parsedBody = parseJsonBody(event);
+    if (!parsedBody.ok) {
+      return errorResponse(400, "invalid_json", "Request body must be valid JSON", context.requestId);
+    }
+
+    sourceUrl = typeof parsedBody.value?.source_url === "string" ? parsedBody.value.source_url.trim() : "";
+    cookieHeader = typeof parsedBody.value?.cookie_header === "string" ? parsedBody.value.cookie_header.trim() : "";
+    referer = typeof parsedBody.value?.referer === "string" ? parsedBody.value.referer.trim() : "";
+    if (!sourceUrl) {
+      return errorResponse(400, "invalid_source_url", "Body must include a non-empty source_url", context.requestId);
+    }
+
+    console.log("[pdf-upload] received source-url PDF request for vault_pub", {
+      itemId,
+      vaultId,
+      sourceUrl,
+      hasCookieHeader: Boolean(cookieHeader),
+      referer,
+    });
+  } else {
+    const decoded = decodePdfRequestBuffer(event);
+    if (!decoded.ok) {
+      return errorResponse(decoded.status, decoded.code, decoded.message, context.requestId);
+    }
+    pdfBuffer = decoded.pdfBuffer;
+
+    console.log("[pdf-upload] received PDF for vault_pub", { itemId, vaultId, bytes: pdfBuffer.length });
+  }
+
+  const result = await uploadPdfToGoogleDriveForUser({
+    supabase,
+    userId: principal.userId,
+    publicationId: vaultPub.original_publication_id,
+    vaultPublicationId: vaultPub.id,
+    title: vaultPub.title,
+    year: vaultPub.year,
+    doi: vaultPub.doi,
+    sourceUrl,
+    cookieHeader,
+    referer,
+    pdfBuffer,
+  });
+
+  if (!result.stored) {
+    return errorResponse(
+      502,
+      result.code || "drive_upload_failed",
+      result.message || "PDF upload to Drive failed",
+      context.requestId,
+    );
+  }
+
+  return json(200, {
+    data: result,
+    meta: { request_id: context.requestId },
+  });
+}
+
+async function handleUploadPublicationPdf(supabase, principal, context, event, publicationId) {
+  if (!canWriteWithPrincipal(principal)) {
+    return errorResponse(403, "missing_scope", "Scope vaults:write is required", context.requestId);
+  }
+
+  const { data: publication, error: publicationError } = await supabase
+    .from("publications")
+    .select("id, user_id, title, year, doi")
+    .eq("id", publicationId)
+    .eq("user_id", principal.userId)
+    .single();
+
+  if (publicationError || !publication) {
+    return errorResponse(404, "publication_not_found", "Publication not found", context.requestId);
+  }
+
+  const decoded = decodePdfRequestBuffer(event);
+  if (!decoded.ok) {
+    return errorResponse(decoded.status, decoded.code, decoded.message, context.requestId);
+  }
+
+  console.log("[pdf-upload] received PDF for publication", { publicationId, bytes: decoded.pdfBuffer.length });
+
+  const result = await uploadPdfToGoogleDriveForUser({
+    supabase,
+    userId: principal.userId,
+    publicationId: publication.id,
+    vaultPublicationId: null,
+    title: publication.title,
+    year: publication.year,
+    doi: publication.doi,
+    sourceUrl: null,
+    pdfBuffer: decoded.pdfBuffer,
+  });
+
+  if (!result.stored) {
+    return errorResponse(
+      502,
+      result.code || "drive_upload_failed",
+      result.message || "PDF upload to Drive failed",
+      context.requestId,
+    );
+  }
+
+  return json(200, {
+    data: result,
+    meta: { request_id: context.requestId },
+  });
+}
+
+async function handleCreatePdfDriveSession(supabase, principal, context, vaultId, itemId) {
+  if (!canWriteWithPrincipal(principal)) {
+    return errorResponse(403, "missing_scope", "Scope vaults:write is required", context.requestId);
+  }
+
+  const access = await resolveVaultAccess(supabase, principal, vaultId, "editor");
+  if (!access.ok) {
+    return errorResponse(access.status, access.code, "Vault write access denied", context.requestId);
+  }
+
+  const { data: vaultPub, error: vpError } = await supabase
+    .from("vault_publications")
+    .select("id, title, year")
+    .eq("id", itemId)
+    .eq("vault_id", vaultId)
+    .single();
+
+  if (vpError || !vaultPub) {
+    return errorResponse(404, "item_not_found", "Vault item not found", context.requestId);
+  }
+
+  const session = await createDriveResumableSession(supabase, principal.userId, {
+    title: vaultPub.title,
+    year: vaultPub.year,
+  });
+
+  if (!session) {
+    return errorResponse(503, "drive_not_linked", "Google Drive is not linked for this account", context.requestId);
+  }
+
+  return json(200, { data: session, meta: { request_id: context.requestId } });
+}
+
+async function handleCompletePdfDriveUpload(supabase, principal, context, event, vaultId, itemId) {
+  if (!canWriteWithPrincipal(principal)) {
+    return errorResponse(403, "missing_scope", "Scope vaults:write is required", context.requestId);
+  }
+
+  const access = await resolveVaultAccess(supabase, principal, vaultId, "editor");
+  if (!access.ok) {
+    return errorResponse(access.status, access.code, "Vault write access denied", context.requestId);
+  }
+
+  const { data: vaultPub, error: vpError } = await supabase
+    .from("vault_publications")
+    .select("id, original_publication_id")
+    .eq("id", itemId)
+    .eq("vault_id", vaultId)
+    .single();
+
+  if (vpError || !vaultPub) {
+    return errorResponse(404, "item_not_found", "Vault item not found", context.requestId);
+  }
+
+  const parsedBody = parseJsonBody(event);
+  if (!parsedBody.ok) {
+    return errorResponse(400, "invalid_json", "Request body must be valid JSON", context.requestId);
+  }
+
+  const { file_id, web_view_link, source_url } = parsedBody.value || {};
+  if (!file_id) {
+    return errorResponse(400, "missing_file_id", "Body must include file_id", context.requestId);
+  }
+
+  const result = await recordBrowserDriveUpload(supabase, {
+    userId: principal.userId,
+    publicationId: vaultPub.original_publication_id,
+    vaultPublicationId: vaultPub.id,
+    fileId: file_id,
+    webViewLink: web_view_link || null,
+    sourceUrl: source_url || null,
+  });
+
+  return json(200, { data: result, meta: { request_id: context.requestId } });
+}
+
+async function handleGetGoogleDriveStatus(supabase, principal, context) {
+  return json(200, {
+    data: await getGoogleDriveStatus(supabase, principal.userId),
+    meta: {
+      request_id: context.requestId,
+    },
+  });
+}
+
+async function handleStartGoogleDriveLink(principal, context, event) {
+  const parsedBody = parseJsonBody(event);
+  if (!parsedBody.ok) {
+    return errorResponse(400, "invalid_json", "Request body must be valid JSON", context.requestId);
+  }
+
+  const { authorizationUrl, returnTo, scope } = createGoogleDriveAuthorizationUrl({
+    userId: principal.userId,
+    returnTo: parsedBody.value?.return_to,
+  });
+
+  return json(200, {
+    data: {
+      authorization_url: authorizationUrl,
+      return_to: returnTo,
+      scope,
+    },
+    meta: {
+      request_id: context.requestId,
+    },
+  });
+}
+
+async function handleEnsureGoogleDriveFolder(supabase, principal, context) {
+  return json(200, {
+    data: await ensureGoogleDriveFolderForUser(supabase, principal.userId),
+    meta: {
+      request_id: context.requestId,
+    },
+  });
+}
+
+async function handleDisconnectGoogleDrive(supabase, principal, context) {
+  return json(200, {
+    data: await disconnectGoogleDriveForUser(supabase, principal.userId),
+    meta: {
+      request_id: context.requestId,
+    },
+  });
+}
+
+async function handleGoogleDriveCallback(_context, event) {
+  const params = event.queryStringParameters || {};
+  const state = params.state || null;
+  const code = params.code || null;
+  const oauthError = params.error || null;
+
+  if (!state) {
+    return text(400, "Missing Google Drive OAuth state.");
+  }
+
+  if (!code && !oauthError) {
+    return text(400, "Missing Google Drive OAuth code.");
+  }
+
+  try {
+    const { redirectUrl } = await completeGoogleDriveLink(getSupabaseAdmin(), {
+      state,
+      code,
+      error: oauthError,
+    });
+
+    return {
+      statusCode: 302,
+      headers: {
+        location: redirectUrl,
+        "cache-control": "no-store",
+      },
+      body: "",
+    };
+  } catch (error) {
+    const redirectUrl = new URL(getGoogleDriveCallbackFallbackUrl());
+    redirectUrl.searchParams.set("gdrive", "error");
+    redirectUrl.searchParams.set("gdrive_message", error.message || "Google Drive linking failed.");
+    return {
+      statusCode: 302,
+      headers: {
+        location: redirectUrl.toString(),
+        "cache-control": "no-store",
+      },
+      body: "",
+    };
+  }
+}
+
+async function handleExtensionGoogleDriveStatus(supabase, principal, context) {
+  const status = await getGoogleDriveStatus(supabase, principal.userId);
+  return json(200, {
+    data: {
+      linked: status.linked,
+      folder_status: status.folderStatus,
+      folder_name: status.folderName,
+      folder_id: status.folderId,
+    },
+    meta: {
+      request_id: context.requestId,
+    },
+  });
+}
+
 async function handleUpdateItem(supabase, principal, context, vaultId, itemId, event) {
   if (!requireScope(principal, API_SCOPES.WRITE)) {
     return errorResponse(403, "missing_scope", "Scope vaults:write is required", context.requestId);
@@ -1387,8 +1883,22 @@ export async function handler(event) {
     }
 
     const route = getRouteSegments(event.path || "/");
+
+    if (route.length === 2 && route[0] === "google-drive" && route[1] === "callback" && event.httpMethod === "GET") {
+      return withCors(await handleGoogleDriveCallback(context, event), corsHeaders);
+    }
+
     const isManagementRoute =
-      route[0] === "keys" || route[0] === "recommendations" || route[0] === "references" || route[0] === "citations" || route[0] === "lookup" || route[0] === "doi-metadata" || route[0] === "search";
+      route[0] === "keys" ||
+      route[0] === "recommendations" ||
+      route[0] === "references" ||
+      route[0] === "citations" ||
+      route[0] === "lookup" ||
+      route[0] === "doi-metadata" ||
+      route[0] === "search" ||
+      route[0] === "google-drive" ||
+      route[0] === "publications" ||
+      route[0] === "audit";
 
     if (isManagementRoute) {
       const authorization = event.headers?.authorization || event.headers?.Authorization || null;
@@ -1442,6 +1952,21 @@ export async function handler(event) {
         response = await handleRevokeApiKey(supabase, principal, context, route[1]);
       } else if (route.length === 3 && route[0] === "keys" && route[2] === "revoke" && event.httpMethod === "POST") {
         response = await handleRevokeApiKey(supabase, principal, context, route[1]);
+      } else if (route.length === 1 && route[0] === "google-drive" && event.httpMethod === "GET") {
+        response = await handleGetGoogleDriveStatus(supabase, principal, context);
+      } else if (route.length === 2 && route[0] === "google-drive" && route[1] === "connect" && event.httpMethod === "POST") {
+        response = await handleStartGoogleDriveLink(principal, context, event);
+      } else if (route.length === 2 && route[0] === "google-drive" && route[1] === "folder" && event.httpMethod === "POST") {
+        response = await handleEnsureGoogleDriveFolder(supabase, principal, context);
+      } else if (route.length === 1 && route[0] === "google-drive" && event.httpMethod === "DELETE") {
+        response = await handleDisconnectGoogleDrive(supabase, principal, context);
+      } else if (route.length === 6 && route[0] === "google-drive" && route[1] === "vaults" && route[3] === "items" && route[5] === "pdf" && event.httpMethod === "POST") {
+        response = await handleUploadItemPdf(supabase, principal, context, event, route[2], route[4]);
+      } else if (route.length === 3 && route[0] === "publications" && route[2] === "pdf" && event.httpMethod === "POST") {
+        response = await handleUploadPublicationPdf(supabase, principal, context, event, route[1]);
+      // ── V2 management routes ────────────────────────────────────────────────
+      } else if (route.length === 1 && route[0] === "audit" && event.httpMethod === "GET") {
+        response = await handleListGlobalAudit(supabase, principal, context, event);
       } else {
         response = errorResponse(404, "route_not_found", "Route not found", context.requestId);
       }
@@ -1461,14 +1986,92 @@ export async function handler(event) {
 
       if (route.length === 1 && route[0] === "vaults" && event.httpMethod === "GET") {
         response = await handleListVaults(supabase, principal, context);
+      // ── V2: vault CRUD ──────────────────────────────────────────────────────
+      } else if (route.length === 1 && route[0] === "vaults" && event.httpMethod === "POST") {
+        response = await handleCreateVault(supabase, principal, context, event);
       } else if (route.length === 2 && route[0] === "vaults" && event.httpMethod === "GET") {
         response = await handleReadVault(supabase, principal, context, route[1]);
+      } else if (route.length === 2 && route[0] === "vaults" && event.httpMethod === "PATCH") {
+        response = await handleUpdateVault(supabase, principal, context, route[1], event);
+      } else if (route.length === 2 && route[0] === "vaults" && event.httpMethod === "DELETE") {
+        response = await handleDeleteVault(supabase, principal, context, route[1]);
+      // ── V2: visibility ──────────────────────────────────────────────────────
+      } else if (route.length === 3 && route[0] === "vaults" && route[2] === "visibility" && event.httpMethod === "PATCH") {
+        response = await handleUpdateVaultVisibility(supabase, principal, context, route[1], event);
+      // ── V2: shares ──────────────────────────────────────────────────────────
+      } else if (route.length === 3 && route[0] === "vaults" && route[2] === "shares" && event.httpMethod === "GET") {
+        response = await handleListVaultShares(supabase, principal, context, route[1]);
+      } else if (route.length === 3 && route[0] === "vaults" && route[2] === "shares" && event.httpMethod === "POST") {
+        response = await handleCreateVaultShare(supabase, principal, context, route[1], event);
+      } else if (route.length === 4 && route[0] === "vaults" && route[2] === "shares" && event.httpMethod === "PATCH") {
+        response = await handleUpdateVaultShare(supabase, principal, context, route[1], route[3], event);
+      } else if (route.length === 4 && route[0] === "vaults" && route[2] === "shares" && event.httpMethod === "DELETE") {
+        response = await handleDeleteVaultShare(supabase, principal, context, route[1], route[3]);
+      // ── V2: tags ────────────────────────────────────────────────────────────
+      } else if (route.length === 3 && route[0] === "vaults" && route[2] === "tags" && event.httpMethod === "GET") {
+        response = await handleListTags(supabase, principal, context, route[1]);
+      } else if (route.length === 3 && route[0] === "vaults" && route[2] === "tags" && event.httpMethod === "POST") {
+        response = await handleCreateTag(supabase, principal, context, route[1], event);
+      } else if (route.length === 4 && route[0] === "vaults" && route[2] === "tags" && route[3] === "attach" && event.httpMethod === "POST") {
+        response = await handleAttachTags(supabase, principal, context, route[1], event);
+      } else if (route.length === 4 && route[0] === "vaults" && route[2] === "tags" && route[3] === "detach" && event.httpMethod === "POST") {
+        response = await handleDetachTags(supabase, principal, context, route[1], event);
+      } else if (route.length === 4 && route[0] === "vaults" && route[2] === "tags" && event.httpMethod === "PATCH") {
+        response = await handleUpdateTag(supabase, principal, context, route[1], route[3], event);
+      } else if (route.length === 4 && route[0] === "vaults" && route[2] === "tags" && event.httpMethod === "DELETE") {
+        response = await handleDeleteTag(supabase, principal, context, route[1], route[3]);
+      // ── V2: relations ───────────────────────────────────────────────────────
+      } else if (route.length === 3 && route[0] === "vaults" && route[2] === "relations" && event.httpMethod === "GET") {
+        response = await handleListRelations(supabase, principal, context, route[1], event);
+      } else if (route.length === 3 && route[0] === "vaults" && route[2] === "relations" && event.httpMethod === "POST") {
+        response = await handleCreateRelation(supabase, principal, context, route[1], event);
+      } else if (route.length === 4 && route[0] === "vaults" && route[2] === "relations" && event.httpMethod === "PATCH") {
+        response = await handleUpdateRelation(supabase, principal, context, route[1], route[3], event);
+      } else if (route.length === 4 && route[0] === "vaults" && route[2] === "relations" && event.httpMethod === "DELETE") {
+        response = await handleDeleteRelation(supabase, principal, context, route[1], route[3]);
+      // ── V2: search / stats / changes ────────────────────────────────────────
+      } else if (route.length === 3 && route[0] === "vaults" && route[2] === "items" && event.httpMethod === "GET") {
+        response = await handleSearchItems(supabase, principal, context, route[1], event);
+      } else if (route.length === 3 && route[0] === "vaults" && route[2] === "search" && event.httpMethod === "GET") {
+        response = await handleSearchItems(supabase, principal, context, route[1], event);
+      } else if (route.length === 3 && route[0] === "vaults" && route[2] === "stats" && event.httpMethod === "GET") {
+        response = await handleGetVaultStats(supabase, principal, context, route[1]);
+      } else if (route.length === 3 && route[0] === "vaults" && route[2] === "changes" && event.httpMethod === "GET") {
+        response = await handleGetVaultChanges(supabase, principal, context, route[1], event);
+      // ── V2: item delete / upsert / preview ──────────────────────────────────
+      } else if (route.length === 4 && route[0] === "vaults" && route[2] === "items" && route[3] === "upsert" && event.httpMethod === "POST") {
+        response = await handleBulkUpsertItems(supabase, principal, context, route[1], event);
+      } else if (route.length === 4 && route[0] === "vaults" && route[2] === "items" && route[3] === "import-preview" && event.httpMethod === "POST") {
+        response = await handleImportPreview(supabase, principal, context, route[1], event);
+      } else if (route.length === 4 && route[0] === "vaults" && route[2] === "items" && event.httpMethod === "DELETE") {
+        response = await handleDeleteItem(supabase, principal, context, route[1], route[3]);
+      // ── V2: import ──────────────────────────────────────────────────────────
+      } else if (route.length === 4 && route[0] === "vaults" && route[2] === "import" && route[3] === "doi" && event.httpMethod === "POST") {
+        response = await handleImportDoi(supabase, principal, context, route[1], event);
+      } else if (route.length === 4 && route[0] === "vaults" && route[2] === "import" && route[3] === "bibtex" && event.httpMethod === "POST") {
+        response = await handleImportBibtex(supabase, principal, context, route[1], event);
+      } else if (route.length === 4 && route[0] === "vaults" && route[2] === "import" && route[3] === "url" && event.httpMethod === "POST") {
+        response = await handleImportUrl(supabase, principal, context, route[1], event);
+      // ── V2: audit ───────────────────────────────────────────────────────────
+      } else if (route.length === 3 && route[0] === "vaults" && route[2] === "audit" && event.httpMethod === "GET") {
+        response = await handleListVaultAudit(supabase, principal, context, route[1], event);
+      // ── existing routes ─────────────────────────────────────────────────────
+      } else if (route.length === 1 && route[0] === "pdf-metadata" && event.httpMethod === "POST") {
+        response = await handlePdfMetadataRoute(context, event, principal);
       } else if (route.length === 3 && route[0] === "vaults" && route[2] === "items" && event.httpMethod === "POST") {
         response = await handleAddItems(supabase, principal, context, route[1], event);
+      } else if (route.length === 5 && route[0] === "vaults" && route[2] === "items" && route[4] === "pdf" && event.httpMethod === "POST") {
+        response = await handleUploadItemPdf(supabase, principal, context, event, route[1], route[3]);
+      } else if (route.length === 6 && route[0] === "vaults" && route[2] === "items" && route[4] === "pdf" && route[5] === "session" && event.httpMethod === "POST") {
+        response = await handleCreatePdfDriveSession(supabase, principal, context, route[1], route[3]);
+      } else if (route.length === 6 && route[0] === "vaults" && route[2] === "items" && route[4] === "pdf" && route[5] === "complete" && event.httpMethod === "POST") {
+        response = await handleCompletePdfDriveUpload(supabase, principal, context, event, route[1], route[3]);
       } else if (route.length === 4 && route[0] === "vaults" && route[2] === "items" && event.httpMethod === "PATCH") {
         response = await handleUpdateItem(supabase, principal, context, route[1], route[3], event);
       } else if (route.length === 3 && route[0] === "vaults" && route[2] === "export" && event.httpMethod === "GET") {
         response = await handleExportVault(supabase, principal, context, route[1], event);
+      } else if (route.length === 2 && route[0] === "extension" && route[1] === "google-drive-status" && event.httpMethod === "GET") {
+        response = await handleExtensionGoogleDriveStatus(supabase, principal, context);
       } else {
         response = errorResponse(404, "route_not_found", "Route not found", context.requestId);
       }

@@ -112,7 +112,16 @@ export function createCorsHeaders(event, allowedOrigins = []) {
   const headers = normalizeHeaders(event.headers);
   const origin = headers.origin;
 
-  if (!origin || !allowedOrigins.includes(origin)) {
+  if (!origin) {
+    return {};
+  }
+
+  // Browser extension origins (moz-extension://, chrome-extension://, safari-extension://)
+  // are bound to a specific installed extension and cannot be spoofed by arbitrary web pages.
+  // Auth is handled by the API key, so allowing these is safe.
+  const isExtensionOrigin = /^(chrome|moz|safari)-extension:\/\//i.test(origin);
+
+  if (!isExtensionOrigin && !allowedOrigins.includes(origin)) {
     return {};
   }
 

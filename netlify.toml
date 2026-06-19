@@ -10,3 +10,7 @@
 [functions]
   directory = "functions"
   node_bundler = "esbuild"
+  # pdf-parse is a CJS-only package with no exports field.
+  # Marking it external tells esbuild to leave it as a runtime require()
+  # instead of trying to inline it, which breaks in Lambda mode.
+  external_node_modules = ["pdf-parse"]

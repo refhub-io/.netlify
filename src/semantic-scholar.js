@@ -1,5 +1,8 @@
 const DEFAULT_PAPER_LIST_LIMIT = 10;
 const MAX_PAPER_LIST_LIMIT = 25;
+const DEFAULT_SEARCH_LIMIT = 10;
+const MAX_SEARCH_LIMIT = 25;
+const MIN_SEARCH_QUERY_LENGTH = 2;
 const SEMANTIC_SCHOLAR_LOOKUP_FIELDS = ["paperId"];
 const SEMANTIC_SCHOLAR_PAPER_FIELDS = [
   "paperId",
@@ -20,6 +23,91 @@ function createSemanticScholarError(code, message, status, details = undefined) 
   error.status = status;
   error.details = details;
   return error;
+}
+
+function parseRetryAfterSeconds(value) {
+  if (typeof value !== "string" || !value.trim()) {
+    return null;
+  }
+
+  const numeric = Number(value);
+  if (Number.isFinite(numeric) && numeric >= 0) {
+    return Math.max(0, Math.ceil(numeric));
+  }
+
+  const dateMs = Date.parse(value);
+  if (Number.isNaN(dateMs)) {
+    return null;
+  }
+
+  const diffMs = dateMs - Date.now();
+  return diffMs > 0 ? Math.max(1, Math.ceil(diffMs / 1000)) : 0;
+}
+
+function getUpstreamErrorDetails(response) {
+  const retryAfterSeconds = parseRetryAfterSeconds(response.headers.get("retry-after"));
+  return retryAfterSeconds == null
+    ? undefined
+    : {
+      retry_after_seconds: retryAfterSeconds,
+    };
+}
+
+async function requestSemanticScholar(url, init = {}) {
+  try {
+    return await fetch(url, init);
+  } catch (error) {
+    if (error?.name === "TimeoutError" || error?.name === "AbortError") {
+      throw createSemanticScholarError(
+        "semantic_scholar_timeout",
+        "Semantic Scholar request timed out",
+        504,
+      );
+    }
+
+    throw createSemanticScholarError(
+      "semantic_scholar_unreachable",
+      "Semantic Scholar request could not be completed",
+      502,
+    );
+  }
+}
+
+function assertSuccessfulSemanticScholarResponse(response, notFoundError) {
+  if (response.status === 404) {
+    if (notFoundError === null) {
+      return false;
+    }
+
+    throw createSemanticScholarError(
+      notFoundError.code,
+      notFoundError.message,
+      notFoundError.status,
+      notFoundError.details,
+    );
+  }
+
+  if (response.status === 429) {
+    throw createSemanticScholarError(
+      "semantic_scholar_rate_limited",
+      "Semantic Scholar rate limit exceeded",
+      429,
+      getUpstreamErrorDetails(response),
+    );
+  }
+
+  if (!response.ok) {
+    throw createSemanticScholarError(
+      "semantic_scholar_error",
+      "Semantic Scholar request failed",
+      502,
+      {
+        upstream_status: response.status,
+      },
+    );
+  }
+
+  return true;
 }
 
 function normalizeAuthor(author) {
@@ -147,6 +235,41 @@ export function normalizeSemanticScholarDoiRequest(body) {
   };
 }
 
+export function normalizeSemanticScholarSearchRequest(body) {
+  const query = typeof body?.query === "string" ? body.query.trim() : "";
+
+  if (query.length < MIN_SEARCH_QUERY_LENGTH) {
+    return {
+      error: "invalid_query",
+      message: `Body must include a query string with at least ${MIN_SEARCH_QUERY_LENGTH} characters`,
+    };
+  }
+
+  const rawLimit = body?.limit;
+  if (rawLimit === undefined || rawLimit === null || rawLimit === "") {
+    return {
+      value: {
+        query,
+        limit: DEFAULT_SEARCH_LIMIT,
+      },
+    };
+  }
+
+  if (!Number.isInteger(rawLimit) || rawLimit < 1 || rawLimit > MAX_SEARCH_LIMIT) {
+    return {
+      error: "invalid_limit",
+      message: `limit must be an integer between 1 and ${MAX_SEARCH_LIMIT}`,
+    };
+  }
+
+  return {
+    value: {
+      query,
+      limit: rawLimit,
+    },
+  };
+}
+
 async function fetchSemanticScholarPaperList({
   apiKey,
   seedPaperId,
@@ -167,54 +290,17 @@ async function fetchSemanticScholarPaperList({
     headers["x-api-key"] = apiKey;
   }
 
-  let response;
-  try {
-    response = await fetch(url, {
-      method: "GET",
-      headers,
-      signal,
-    });
-  } catch (error) {
-    if (error?.name === "TimeoutError" || error?.name === "AbortError") {
-      throw createSemanticScholarError(
-        "semantic_scholar_timeout",
-        "Semantic Scholar request timed out",
-        504,
-      );
-    }
-
-    throw createSemanticScholarError(
-      "semantic_scholar_unreachable",
-      "Semantic Scholar request could not be completed",
-      502,
-    );
-  }
-
-  if (response.status === 404) {
-    throw createSemanticScholarError(
-      "paper_not_found",
-      "Semantic Scholar seed paper was not found",
-      404,
-      { paper_id: seedPaperId },
-    );
-  }
-
-  if (response.status === 429) {
-    throw createSemanticScholarError(
-      "semantic_scholar_rate_limited",
-      "Semantic Scholar rate limit exceeded",
-      503,
-    );
-  }
-
-  if (!response.ok) {
-    throw createSemanticScholarError(
-      "semantic_scholar_error",
-      "Semantic Scholar request failed",
-      502,
-      { upstream_status: response.status },
-    );
-  }
+  const response = await requestSemanticScholar(url, {
+    method: "GET",
+    headers,
+    signal,
+  });
+  assertSuccessfulSemanticScholarResponse(response, {
+    code: "paper_not_found",
+    message: "Semantic Scholar seed paper was not found",
+    status: 404,
+    details: { paper_id: seedPaperId },
+  });
 
   const payload = await response.json();
   const responseItems = responseItemsPath.reduce((value, key) => value?.[key], payload);
@@ -242,58 +328,21 @@ export async function fetchSemanticScholarRecommendations({ apiKey, seedPaperId,
     headers["x-api-key"] = apiKey;
   }
 
-  let response;
-  try {
-    response = await fetch(url, {
-      method: "POST",
-      headers,
-      body: JSON.stringify({
-        positivePaperIds: [seedPaperId],
-        negativePaperIds: [],
-      }),
-      signal,
-    });
-  } catch (error) {
-    if (error?.name === "TimeoutError" || error?.name === "AbortError") {
-      throw createSemanticScholarError(
-        "semantic_scholar_timeout",
-        "Semantic Scholar request timed out",
-        504,
-      );
-    }
-
-    throw createSemanticScholarError(
-      "semantic_scholar_unreachable",
-      "Semantic Scholar request could not be completed",
-      502,
-    );
-  }
-
-  if (response.status === 404) {
-    throw createSemanticScholarError(
-      "paper_not_found",
-      "Semantic Scholar seed paper was not found",
-      404,
-      { paper_id: seedPaperId },
-    );
-  }
-
-  if (response.status === 429) {
-    throw createSemanticScholarError(
-      "semantic_scholar_rate_limited",
-      "Semantic Scholar rate limit exceeded",
-      503,
-    );
-  }
-
-  if (!response.ok) {
-    throw createSemanticScholarError(
-      "semantic_scholar_error",
-      "Semantic Scholar request failed",
-      502,
-      { upstream_status: response.status },
-    );
-  }
+  const response = await requestSemanticScholar(url, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({
+      positivePaperIds: [seedPaperId],
+      negativePaperIds: [],
+    }),
+    signal,
+  });
+  assertSuccessfulSemanticScholarResponse(response, {
+    code: "paper_not_found",
+    message: "Semantic Scholar seed paper was not found",
+    status: 404,
+    details: { paper_id: seedPaperId },
+  });
 
   const payload = await response.json();
   const recommendedPapers = Array.isArray(payload?.recommendedPapers) ? payload.recommendedPapers : [];
@@ -351,49 +400,21 @@ export async function fetchSemanticScholarPaperLookup({ apiKey, queryType, query
     url.searchParams.set("limit", "1");
   }
 
-  let response;
-  try {
-    response = await fetch(url, {
-      method: "GET",
-      headers,
-      signal,
-    });
-  } catch (error) {
-    if (error?.name === "TimeoutError" || error?.name === "AbortError") {
-      throw createSemanticScholarError(
-        "semantic_scholar_timeout",
-        "Semantic Scholar request timed out",
-        504,
-      );
-    }
-
-    throw createSemanticScholarError(
-      "semantic_scholar_unreachable",
-      "Semantic Scholar request could not be completed",
-      502,
-    );
-  }
+  const response = await requestSemanticScholar(url, {
+    method: "GET",
+    headers,
+    signal,
+  });
 
   if (response.status === 404 && queryType === "doi") {
     return null;
   }
 
-  if (response.status === 429) {
-    throw createSemanticScholarError(
-      "semantic_scholar_rate_limited",
-      "Semantic Scholar rate limit exceeded",
-      503,
-    );
-  }
-
-  if (!response.ok) {
-    throw createSemanticScholarError(
-      "semantic_scholar_error",
-      "Semantic Scholar request failed",
-      502,
-      { upstream_status: response.status },
-    );
-  }
+  assertSuccessfulSemanticScholarResponse(response, {
+    code: "paper_not_found",
+    message: "Semantic Scholar paper was not found",
+    status: 404,
+  });
 
   const payload = await response.json();
   const paperId =
@@ -404,6 +425,37 @@ export async function fetchSemanticScholarPaperLookup({ apiKey, queryType, query
         : null;
 
   return typeof paperId === "string" && paperId.trim() ? paperId : null;
+}
+
+export async function fetchSemanticScholarSearch({ apiKey, query, limit, signal }) {
+  const headers = {
+    accept: "application/json",
+  };
+
+  if (apiKey) {
+    headers["x-api-key"] = apiKey;
+  }
+
+  const url = new URL("https://api.semanticscholar.org/graph/v1/paper/search/bulk");
+  url.searchParams.set("query", query);
+  url.searchParams.set("fields", SEMANTIC_SCHOLAR_PAPER_FIELDS.join(","));
+  url.searchParams.set("limit", String(limit));
+  url.searchParams.set("sort", "citationCount:desc");
+
+  const response = await requestSemanticScholar(url, {
+    method: "GET",
+    headers,
+    signal,
+  });
+  assertSuccessfulSemanticScholarResponse(response, {
+    code: "semantic_scholar_search_failed",
+    message: "Semantic Scholar search failed",
+    status: 502,
+  });
+
+  const payload = await response.json();
+  const papers = Array.isArray(payload?.data) ? payload.data : [];
+  return limitNormalizedPapers(papers.map(normalizePaper), limit);
 }
 
 export async function fetchSemanticScholarDoiMetadata({ apiKey, doi, signal }) {
@@ -421,49 +473,21 @@ export async function fetchSemanticScholarDoiMetadata({ apiKey, doi, signal }) {
     ["title", "authors", "year", "venue", "publicationVenue", "abstract", "externalIds", "publicationTypes"].join(","),
   );
 
-  let response;
-  try {
-    response = await fetch(url, {
-      method: "GET",
-      headers,
-      signal,
-    });
-  } catch (error) {
-    if (error?.name === "TimeoutError" || error?.name === "AbortError") {
-      throw createSemanticScholarError(
-        "semantic_scholar_timeout",
-        "Semantic Scholar request timed out",
-        504,
-      );
-    }
-
-    throw createSemanticScholarError(
-      "semantic_scholar_unreachable",
-      "Semantic Scholar request could not be completed",
-      502,
-    );
-  }
+  const response = await requestSemanticScholar(url, {
+    method: "GET",
+    headers,
+    signal,
+  });
 
   if (response.status === 404) {
     return null;
   }
 
-  if (response.status === 429) {
-    throw createSemanticScholarError(
-      "semantic_scholar_rate_limited",
-      "Semantic Scholar rate limit exceeded",
-      503,
-    );
-  }
-
-  if (!response.ok) {
-    throw createSemanticScholarError(
-      "semantic_scholar_error",
-      "Semantic Scholar request failed",
-      502,
-      { upstream_status: response.status },
-    );
-  }
+  assertSuccessfulSemanticScholarResponse(response, {
+    code: "paper_not_found",
+    message: "Semantic Scholar paper was not found",
+    status: 404,
+  });
 
   const work = await response.json();
   const authors = Array.isArray(work?.authors)

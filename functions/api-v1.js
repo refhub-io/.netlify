@@ -40,10 +40,12 @@ import {
   fetchSemanticScholarPaperLookup,
   fetchSemanticScholarRecommendations,
   fetchSemanticScholarReferences,
+  fetchSemanticScholarSearch,
   isRefHubApiKeyValue,
   normalizePaperListRequest,
   normalizePaperLookupRequest,
   normalizeSemanticScholarDoiRequest,
+  normalizeSemanticScholarSearchRequest,
 } from "../src/semantic-scholar.js";
 
 // ── V2 route modules ──────────────────────────────────────────────────────────
@@ -164,7 +166,7 @@ function toSafeErrorResponse(error, requestId) {
 
   if (["semantic_scholar_rate_limited", "semantic_scholar_error", "semantic_scholar_timeout", "semantic_scholar_unreachable"]
     .includes(error?.code)) {
-    return errorResponse(error.status || 502, error.code, error.message, requestId);
+    return errorResponse(error.status || 502, error.code, error.message, requestId, error.details);
   }
 
   return errorResponse(500, "internal_error", "Unexpected server error", requestId);
@@ -756,6 +758,80 @@ async function handlePaperLookup(context, event, principal) {
     },
   });
 }
+async function handleSemanticScholarSearchRoute(context, event, principal) {
+  const parsedBody = parseJsonBody(event);
+  if (!parsedBody.ok) {
+    return errorResponse(400, "invalid_json", "Request body must be valid JSON", context.requestId);
+  }
+
+  const normalizedRequest = normalizeSemanticScholarSearchRequest(parsedBody.value || {});
+  if (normalizedRequest.error) {
+    return errorResponse(400, normalizedRequest.error, normalizedRequest.message, context.requestId);
+  }
+
+  const { query, limit } = normalizedRequest.value;
+  const cacheKey = `search:${query.toLowerCase()}:${limit}`;
+  const cached = getCachedSemanticScholarValue(cacheKey);
+  const papers = cached.hit
+    ? await cached.value
+    : await (async () => {
+      const rateLimit = takeSemanticScholarRateLimit(principal?.userId);
+      if (!rateLimit.allowed) {
+        return json(
+          429,
+          {
+            error: {
+              code: "rate_limit_exceeded",
+              message: "Too many Semantic Scholar requests; please retry shortly",
+              details: {
+                retry_after_seconds: rateLimit.retryAfterSeconds,
+              },
+            },
+            meta: {
+              request_id: context.requestId,
+            },
+          },
+          {
+            "retry-after": String(rateLimit.retryAfterSeconds),
+          },
+        );
+      }
+
+      const { semanticScholarApiKey } = getConfig();
+      const timeout = AbortSignal.timeout(8000);
+      try {
+        return await getCachedSemanticScholarResponse(cacheKey, () =>
+          fetchSemanticScholarSearch({
+            apiKey: semanticScholarApiKey,
+            query,
+            limit,
+            signal: timeout,
+          })
+        );
+      } catch (error) {
+        const stale = getStaleSemanticScholarValue(cacheKey);
+        if (error?.code === "semantic_scholar_rate_limited" && stale.hit) {
+          return stale.value;
+        }
+
+        throw error;
+      }
+    })();
+
+  if (papers?.statusCode) {
+    return papers;
+  }
+
+  return json(200, {
+    data: papers,
+    meta: {
+      request_id: context.requestId,
+      query,
+      limit,
+    },
+  });
+}
+
 async function handleSemanticScholarDoiMetadataRoute(context, event, principal) {
   if (!requireScope(principal, API_SCOPES.READ)) {
     return errorResponse(403, "missing_scope", "Scope vaults:read is required", context.requestId);
@@ -1819,6 +1895,7 @@ export async function handler(event) {
       route[0] === "citations" ||
       route[0] === "lookup" ||
       route[0] === "doi-metadata" ||
+      route[0] === "search" ||
       route[0] === "google-drive" ||
       route[0] === "publications" ||
       route[0] === "audit";
@@ -1869,6 +1946,8 @@ export async function handler(event) {
         response = await handlePaperLookup(context, event, principal);
       } else if (route.length === 1 && route[0] === "doi-metadata" && event.httpMethod === "POST") {
         response = await handleSemanticScholarDoiMetadataRoute(context, event, principal);
+      } else if (route.length === 1 && route[0] === "search" && event.httpMethod === "POST") {
+        response = await handleSemanticScholarSearchRoute(context, event, principal);
       } else if (route.length === 2 && route[0] === "keys" && event.httpMethod === "DELETE") {
         response = await handleRevokeApiKey(supabase, principal, context, route[1]);
       } else if (route.length === 3 && route[0] === "keys" && route[2] === "revoke" && event.httpMethod === "POST") {
@@ -1998,13 +2077,26 @@ export async function handler(event) {
       }
     }
   } catch (error) {
-    console.error("Unhandled RefHub API error", {
+    const isExpectedSemanticScholarError = [
+      "semantic_scholar_rate_limited",
+      "semantic_scholar_error",
+      "semantic_scholar_timeout",
+      "semantic_scholar_unreachable",
+    ].includes(error?.code);
+    const logPayload = {
       requestId: context.requestId,
       path: context.path,
       method: context.method,
       code: error?.code,
       message: error?.message,
-    });
+    };
+
+    if (isExpectedSemanticScholarError) {
+      console.warn("RefHub upstream Semantic Scholar error", logPayload);
+    } else {
+      console.error("Unhandled RefHub API error", logPayload);
+    }
+
     response = toSafeErrorResponse(error, context.requestId);
   }
 

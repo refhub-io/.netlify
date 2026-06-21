@@ -69,6 +69,24 @@ describe("handleSearchItems", () => {
     expect(parseBody(res).data).toEqual([]);
     expect(parseBody(res).meta.total).toBe(0);
   });
+
+  it("accepts CLI-compatible limit, tag_id, and doi filters", async () => {
+    const vault = makeMockVault();
+    const items = [{ id: "pub1", title: "Filtered Paper", doi: "10.1/x" }];
+    const supabase = makeMockSupabaseMulti({
+      vaults: [{ data: vault, error: null }],
+      vault_shares: [{ data: null, error: null }],
+      publication_tags: [{ data: [{ vault_publication_id: "pub1" }], error: null }],
+      vault_publications: [{ data: items, error: null, count: 1 }],
+    });
+    const principal = makeApiKeyPrincipal();
+    const event = makeEvent({ query: { limit: "7", tag_id: "tag-1", doi: "10.1/x" } });
+
+    const res = await handleSearchItems(supabase, principal, CTX, vault.id, event);
+
+    expect(res.statusCode).toBe(200);
+    expect(parseBody(res).meta.per_page).toBe(7);
+  });
 });
 
 // ─── handleGetVaultStats ─────────────────────────────────────────────────────

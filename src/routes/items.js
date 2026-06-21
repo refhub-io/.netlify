@@ -2,6 +2,7 @@
  * V2 item lifecycle route handlers (complement to existing add/update in api-v1.js).
  *
  * Covered endpoints:
+ *   GET    /api/v1/vaults/:vaultId/items/:itemId          handleGetItem
  *   DELETE /api/v1/vaults/:vaultId/items/:itemId          handleDeleteItem
  *   POST   /api/v1/vaults/:vaultId/items/upsert           handleBulkUpsertItems
  *   POST   /api/v1/vaults/:vaultId/items/import-preview   handleImportPreview
@@ -15,6 +16,34 @@ import { VAULT_PUBLICATION_SELECT, pickPublicationFields, touchVaultUpdatedAt } 
 // In-memory idempotency cache for bulk upsert (TTL: 5 min)
 const upsertIdempotencyCache = new Map();
 const IDEMPOTENCY_TTL_MS = 5 * 60 * 1000;
+
+// ─── Get ─────────────────────────────────────────────────────────────────────
+
+export async function handleGetItem(supabase, principal, context, vaultId, itemId) {
+  if (!requireScope(principal, API_SCOPES.READ)) {
+    return errorResponse(403, "missing_scope", "Scope vaults:read is required", context.requestId);
+  }
+
+  const access = await resolveVaultAccess(supabase, principal, vaultId, "viewer");
+  if (!access.ok) {
+    return errorResponse(access.status, access.code, "Vault access denied", context.requestId);
+  }
+
+  const { data: item, error } = await supabase
+    .from("vault_publications")
+    .select(VAULT_PUBLICATION_SELECT)
+    .eq("id", itemId)
+    .eq("vault_id", vaultId)
+    .maybeSingle();
+
+  if (error) throw error;
+  if (!item) return errorResponse(404, "item_not_found", "Item not found", context.requestId);
+
+  return json(200, {
+    data: item,
+    meta: { request_id: context.requestId, vault_id: vaultId },
+  });
+}
 
 // ─── Delete ───────────────────────────────────────────────────────────────────
 

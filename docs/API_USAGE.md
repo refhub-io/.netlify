@@ -32,8 +32,8 @@ Use a normal authenticated Supabase user session JWT for:
 - listing keys
 - creating keys
 - revoking keys
-- fetching Semantic Scholar recommendations for the add/edit paper dialog
-- fetching Semantic Scholar references/citations for cited/citing traversal in the add/edit paper dialog
+- frontend/browser account setup flows
+- legacy frontend Semantic Scholar routes (`/recommendations`, `/references`, `/citations`, `/lookup`, `/doi-metadata`, `/search`)
 
 Send it as:
 
@@ -49,6 +49,8 @@ Use a generated RefHub API key for:
 - adding items
 - updating items
 - exporting vault data
+- API-key Semantic Scholar discovery/enrichment routes under `/semantic-scholar/*`
+- item-scoped PDF uploads after Google Drive has been connected through the normal account UI
 
 Send it as either:
 
@@ -77,6 +79,7 @@ API keys support exactly these scopes:
 - `vaults:read`
   - list accessible vaults
   - read a specific vault and its contents
+  - use API-key Semantic Scholar lookup/search/recommendation/reference/citation routes
 - `vaults:write`
   - add items to a vault
   - update existing items in a vault
@@ -124,7 +127,7 @@ Finds or recreates the managed `refhub` folder in the linked Drive account.
 
 Removes the stored Drive link and best-effort revokes the linked Google refresh token.
 
-### Paper recommendations
+### Legacy frontend Paper recommendations
 
 `POST /api/v1/recommendations`
 
@@ -184,7 +187,7 @@ Example response:
 }
 ```
 
-### Paper references
+### Legacy frontend Paper references
 
 `POST /api/v1/references`
 
@@ -210,7 +213,7 @@ Request rules:
 - successful responses are cached briefly in-process, and the same lightweight per-user rate limit applies
 - upstream Semantic Scholar failures are sanitized before being returned to clients
 
-### Paper citations
+### Legacy frontend Paper citations
 
 `POST /api/v1/citations`
 
@@ -294,6 +297,7 @@ Rules:
   - `vaults:read`
   - `vaults:write`
   - `vaults:export`
+  - `vaults:admin`
 - `description` is optional
 - `expires_at` is optional, but if present must be a future ISO-8601 timestamp
 - `vault_ids` is optional; if provided, each vault must already be accessible to the authenticated user
@@ -484,6 +488,51 @@ curl -s \
 
 This lightweight route lets the browser extension detect whether the RefHub account behind the API key has Drive-backed PDF storage enabled.
 
+
+### Semantic Scholar discovery and enrichment
+
+Requires scope: `vaults:read`
+
+API-key clients should use the namespaced routes below. The legacy root routes (`/lookup`, `/doi-metadata`, `/search`, `/recommendations`, `/references`, `/citations`) remain available to Supabase session JWT clients for the browser frontend.
+
+```bash
+curl -s \
+  -X POST \
+  -H "Authorization: Bearer $RHK" \
+  -H "Content-Type: application/json" \
+  https://refhub-api.netlify.app/api/v1/semantic-scholar/search \
+  -d '{"query":"visual analytics", "limit":10}'
+```
+
+Supported API-key routes:
+
+- `POST /api/v1/semantic-scholar/lookup` with `{ "doi": "..." }` or `{ "title": "..." }`
+- `POST /api/v1/semantic-scholar/doi-metadata` with `{ "doi": "..." }`
+- `POST /api/v1/semantic-scholar/search` with `{ "query": "...", "limit": 1..25 }`
+- `POST /api/v1/semantic-scholar/recommendations` with `{ "paper_id": "...", "limit": 1..25 }`
+- `POST /api/v1/semantic-scholar/related` alias for recommendations
+- `POST /api/v1/semantic-scholar/references` with `{ "paper_id": "...", "limit": 1..25 }`
+- `POST /api/v1/semantic-scholar/citations` with `{ "paper_id": "...", "limit": 1..25 }`
+- `POST /api/v1/semantic-scholar/cited-by` alias for citations
+
+The backend keeps any configured `SEMANTIC_SCHOLAR_API_KEY` server-side, uses the same in-process cache/stale fallback/rate-limit behavior as the frontend routes, and attributes API-key calls by the authenticated key owner/user.
+
+### Get one item
+
+Requires scope: `vaults:read`
+
+```bash
+curl -s \
+  -H "Authorization: Bearer $RHK" \
+  https://refhub-api.netlify.app/api/v1/vaults/<VAULT_ID>/items/<ITEM_ID>
+```
+
+### Search/list items
+
+Requires scope: `vaults:read`
+
+`GET /api/v1/vaults/<VAULT_ID>/items` and `GET /api/v1/vaults/<VAULT_ID>/search` support `page`, `per_page` (or `limit` alias), `q`, `author`, `year`, `doi`, `tag` (or `tag_id` alias), `type`, `sort`, and `order`.
+
 ### Update an item
 
 Requires scope: `vaults:write`
@@ -503,6 +552,21 @@ curl -s \
 ```
 
 If `tag_ids` is provided, it replaces the current tag set on the item.
+
+### Item-scoped PDF upload
+
+Requires scope: `vaults:write` and an already-linked Google Drive account. Google Drive connect/disconnect remains a Supabase session JWT/browser setup flow.
+
+```bash
+curl -s \
+  -X POST \
+  -H "Authorization: Bearer $RHK" \
+  -H "Content-Type: application/pdf" \
+  --data-binary @paper.pdf \
+  https://refhub-api.netlify.app/api/v1/vaults/<VAULT_ID>/items/<ITEM_ID>/pdf
+```
+
+The JSON source-URL variant remains available on the same route when `Content-Type: application/json` is used. Resumable Drive sessions are exposed at `/pdf/session` and `/pdf/complete`.
 
 ### Export a vault as JSON
 
@@ -630,7 +694,7 @@ Write operations require stronger permission checks than read operations.
 {
   "error": {
     "code": "invalid_scopes",
-    "message": "Scopes must be one of vaults:read, vaults:write, vaults:export"
+    "message": "Scopes must be one of vaults:read, vaults:write, vaults:export, vaults:admin"
   }
 }
 ```

@@ -79,6 +79,7 @@ import {
   handleGetVaultChanges,
 } from "../src/routes/search.js";
 import {
+  handleGetItem,
   handleDeleteItem,
   handleBulkUpsertItems,
   handleImportPreview,
@@ -274,7 +275,18 @@ async function getCachedSemanticScholarResponse(cacheKey, fetcher, now = Date.no
   return promise;
 }
 
+
+function ensureSemanticScholarReadScope(principal, context) {
+  if (!requireScope(principal, API_SCOPES.READ)) {
+    return errorResponse(403, "missing_scope", "Scope vaults:read is required", context.requestId);
+  }
+
+  return null;
+}
+
 async function handleSemanticScholarPaperRoute(context, event, principal, routeName, fetcher) {
+  const scopeError = ensureSemanticScholarReadScope(principal, context);
+  if (scopeError) return scopeError;
   const parsedBody = parseJsonBody(event);
   if (!parsedBody.ok) {
     return errorResponse(400, "invalid_json", "Request body must be valid JSON", context.requestId);
@@ -354,6 +366,41 @@ function getAuthFailureMessage(code) {
   }
 
   return "API key authentication failed";
+}
+
+function isLegacySemanticScholarRoute(route) {
+  return route.length === 1 && [
+    "recommendations",
+    "references",
+    "citations",
+    "lookup",
+    "doi-metadata",
+    "search",
+  ].includes(route[0]);
+}
+
+function isApiKeySemanticScholarRoute(route) {
+  return route.length === 2 && route[0] === "semantic-scholar" && [
+    "recommendations",
+    "related",
+    "references",
+    "citations",
+    "cited-by",
+    "lookup",
+    "doi-metadata",
+    "search",
+  ].includes(route[1]);
+}
+
+async function handleSemanticScholarRoute(context, event, principal, routeName) {
+  const canonicalRoute = routeName === "related" ? "recommendations" : routeName === "cited-by" ? "citations" : routeName;
+  if (canonicalRoute === "recommendations") return handlePaperRecommendations(context, event, principal);
+  if (canonicalRoute === "references") return handlePaperReferences(context, event, principal);
+  if (canonicalRoute === "citations") return handlePaperCitations(context, event, principal);
+  if (canonicalRoute === "lookup") return handlePaperLookup(context, event, principal);
+  if (canonicalRoute === "doi-metadata") return handleSemanticScholarDoiMetadataRoute(context, event, principal);
+  if (canonicalRoute === "search") return handleSemanticScholarSearchRoute(context, event, principal);
+  return errorResponse(404, "route_not_found", "Route not found", context.requestId);
 }
 
 function getManagementAuthFailureMessage(code) {
@@ -672,6 +719,8 @@ async function handlePaperCitations(context, event, principal) {
 }
 
 async function handlePaperLookup(context, event, principal) {
+  const scopeError = ensureSemanticScholarReadScope(principal, context);
+  if (scopeError) return scopeError;
   const parsedBody = parseJsonBody(event);
   if (!parsedBody.ok) {
     return errorResponse(400, "invalid_json", "Request body must be valid JSON", context.requestId);
@@ -759,6 +808,8 @@ async function handlePaperLookup(context, event, principal) {
   });
 }
 async function handleSemanticScholarSearchRoute(context, event, principal) {
+  const scopeError = ensureSemanticScholarReadScope(principal, context);
+  if (scopeError) return scopeError;
   const parsedBody = parseJsonBody(event);
   if (!parsedBody.ok) {
     return errorResponse(400, "invalid_json", "Request body must be valid JSON", context.requestId);
@@ -1890,12 +1941,7 @@ export async function handler(event) {
 
     const isManagementRoute =
       route[0] === "keys" ||
-      route[0] === "recommendations" ||
-      route[0] === "references" ||
-      route[0] === "citations" ||
-      route[0] === "lookup" ||
-      route[0] === "doi-metadata" ||
-      route[0] === "search" ||
+      isLegacySemanticScholarRoute(route) ||
       route[0] === "google-drive" ||
       route[0] === "publications" ||
       route[0] === "audit";
@@ -1932,22 +1978,12 @@ export async function handler(event) {
       supabase = authResult.supabase;
       principal = authResult.principal;
 
-      if (route.length === 1 && route[0] === "keys" && event.httpMethod === "GET") {
+      if (isLegacySemanticScholarRoute(route) && event.httpMethod === "POST") {
+        response = await handleSemanticScholarRoute(context, event, principal, route[0]);
+      } else if (route.length === 1 && route[0] === "keys" && event.httpMethod === "GET") {
         response = await handleListApiKeys(supabase, principal, context);
       } else if (route.length === 1 && route[0] === "keys" && event.httpMethod === "POST") {
         response = await handleCreateApiKey(supabase, principal, context, event);
-      } else if (route.length === 1 && route[0] === "recommendations" && event.httpMethod === "POST") {
-        response = await handlePaperRecommendations(context, event, principal);
-      } else if (route.length === 1 && route[0] === "references" && event.httpMethod === "POST") {
-        response = await handlePaperReferences(context, event, principal);
-      } else if (route.length === 1 && route[0] === "citations" && event.httpMethod === "POST") {
-        response = await handlePaperCitations(context, event, principal);
-      } else if (route.length === 1 && route[0] === "lookup" && event.httpMethod === "POST") {
-        response = await handlePaperLookup(context, event, principal);
-      } else if (route.length === 1 && route[0] === "doi-metadata" && event.httpMethod === "POST") {
-        response = await handleSemanticScholarDoiMetadataRoute(context, event, principal);
-      } else if (route.length === 1 && route[0] === "search" && event.httpMethod === "POST") {
-        response = await handleSemanticScholarSearchRoute(context, event, principal);
       } else if (route.length === 2 && route[0] === "keys" && event.httpMethod === "DELETE") {
         response = await handleRevokeApiKey(supabase, principal, context, route[1]);
       } else if (route.length === 3 && route[0] === "keys" && route[2] === "revoke" && event.httpMethod === "POST") {
@@ -1984,7 +2020,9 @@ export async function handler(event) {
       supabase = authResult.supabase;
       principal = authResult.principal;
 
-      if (route.length === 1 && route[0] === "vaults" && event.httpMethod === "GET") {
+      if (isApiKeySemanticScholarRoute(route) && event.httpMethod === "POST") {
+        response = await handleSemanticScholarRoute(context, event, principal, route[1]);
+      } else if (route.length === 1 && route[0] === "vaults" && event.httpMethod === "GET") {
         response = await handleListVaults(supabase, principal, context);
       // ── V2: vault CRUD ──────────────────────────────────────────────────────
       } else if (route.length === 1 && route[0] === "vaults" && event.httpMethod === "POST") {
@@ -2043,6 +2081,8 @@ export async function handler(event) {
         response = await handleBulkUpsertItems(supabase, principal, context, route[1], event);
       } else if (route.length === 4 && route[0] === "vaults" && route[2] === "items" && route[3] === "import-preview" && event.httpMethod === "POST") {
         response = await handleImportPreview(supabase, principal, context, route[1], event);
+      } else if (route.length === 4 && route[0] === "vaults" && route[2] === "items" && event.httpMethod === "GET") {
+        response = await handleGetItem(supabase, principal, context, route[1], route[3]);
       } else if (route.length === 4 && route[0] === "vaults" && route[2] === "items" && event.httpMethod === "DELETE") {
         response = await handleDeleteItem(supabase, principal, context, route[1], route[3]);
       // ── V2: import ──────────────────────────────────────────────────────────

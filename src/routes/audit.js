@@ -20,7 +20,8 @@ const GLOBAL_AUDIT_SELECT = "id, api_key_id, request_id, method, path, response_
 
 function parsePaginationParams(params) {
   const page = Math.max(1, parseInt(params.page || "1", 10) || 1);
-  const perPage = Math.min(100, Math.max(1, parseInt(params.per_page || "25", 10) || 25));
+  const perPageParam = params.per_page || params.limit || "25";
+  const perPage = Math.min(100, Math.max(1, parseInt(perPageParam, 10) || 25));
   return { page, perPage, from: (page - 1) * perPage, to: (page - 1) * perPage + perPage - 1 };
 }
 
@@ -34,10 +35,15 @@ export async function handleListVaultAudit(supabase, principal, context, vaultId
   const params = (event && event.queryStringParameters) || {};
   const { page, perPage, from, to } = parsePaginationParams(params);
 
-  const { data, error, count } = await supabase
+  let query = supabase
     .from("api_request_audit_logs")
     .select(AUDIT_SELECT, { count: "exact" })
-    .eq("vault_id", vaultId)
+    .eq("vault_id", vaultId);
+
+  if (params.since) query = query.gte("created_at", params.since);
+  if (params.until) query = query.lte("created_at", params.until);
+
+  const { data, error, count } = await query
     .order("created_at", { ascending: false })
     .range(from, to);
 
@@ -64,17 +70,19 @@ export async function handleListGlobalAudit(supabase, principal, context, event)
   let query = supabase
     .from("api_request_audit_logs")
     .select(GLOBAL_AUDIT_SELECT, { count: "exact" })
-    .eq("owner_user_id", principal.userId)
-    .order("created_at", { ascending: false })
-    .range(from, to);
+    .eq("owner_user_id", principal.userId);
 
   if (params.vault_id) query = query.eq("vault_id", params.vault_id);
+  if (params.since) query = query.gte("created_at", params.since);
+  if (params.until) query = query.lte("created_at", params.until);
   if (params.status) {
     const status = parseInt(params.status, 10);
     if (!isNaN(status)) query = query.eq("response_status", status);
   }
 
-  const { data, error, count } = await query;
+  const { data, error, count } = await query
+    .order("created_at", { ascending: false })
+    .range(from, to);
   if (error) throw error;
 
   return json(200, {

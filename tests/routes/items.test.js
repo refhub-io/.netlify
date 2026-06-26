@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { handleDeleteItem, handleBulkUpsertItems, handleImportPreview } from "../../src/routes/items.js";
+import { handleGetItem, handleDeleteItem, handleBulkUpsertItems, handleImportPreview } from "../../src/routes/items.js";
 import {
   makeMockSupabase,
   makeMockSupabaseMulti,
@@ -13,7 +13,7 @@ import {
 
 const CTX = makeContext();
 
-// ─── handleDeleteItem ────────────────────────────────────────────────────────
+// ─── handleGetItem ───────────────────────────────────────────────────────────
 
 describe("handleDeleteItem", () => {
   it("returns 403 when write scope missing", async () => {
@@ -59,6 +59,41 @@ describe("handleDeleteItem", () => {
 });
 
 // ─── handleBulkUpsertItems ───────────────────────────────────────────────────
+
+describe("handleGetItem", () => {
+  it("returns one item by id", async () => {
+    const vault = makeMockVault();
+    const item = { id: "pub1", vault_id: vault.id, title: "One Paper" };
+    const supabase = makeMockSupabaseMulti({
+      vaults: [{ data: vault, error: null }],
+      vault_shares: [{ data: null, error: null }],
+      vault_publications: [{ data: item, error: null }],
+    });
+    const principal = makeApiKeyPrincipal();
+
+    const res = await handleGetItem(supabase, principal, CTX, vault.id, item.id);
+
+    expect(res.statusCode).toBe(200);
+    const body = parseBody(res);
+    expect(body.data.id).toBe(item.id);
+    expect(body.meta.vault_id).toBe(vault.id);
+  });
+
+  it("returns 404 when an item id is not in the vault", async () => {
+    const vault = makeMockVault();
+    const supabase = makeMockSupabaseMulti({
+      vaults: [{ data: vault, error: null }],
+      vault_shares: [{ data: null, error: null }],
+      vault_publications: [{ data: null, error: null }],
+    });
+    const principal = makeApiKeyPrincipal();
+
+    const res = await handleGetItem(supabase, principal, CTX, vault.id, "missing");
+
+    expect(res.statusCode).toBe(404);
+    expect(parseBody(res).error.code).toBe("item_not_found");
+  });
+});
 
 describe("handleBulkUpsertItems", () => {
   it("returns 403 when write scope missing", async () => {

@@ -83,7 +83,7 @@ describe("handleListVaultAudit", () => {
       api_request_audit_logs: [{ data: [], error: null, count: 50 }],
     });
     const principal = makeApiKeyPrincipal();
-    const event = makeEvent({ query: { page: "2", per_page: "10" } });
+    const event = makeEvent({ query: { page: "2", limit: "10", since: "2026-01-01T00:00:00Z", until: "2026-01-31T00:00:00Z" } });
 
     const res = await handleListVaultAudit(supabase, principal, CTX, vault.id, event);
 

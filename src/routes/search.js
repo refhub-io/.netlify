@@ -28,7 +28,8 @@ export async function handleSearchItems(supabase, principal, context, vaultId, e
 
   const params = (event && event.queryStringParameters) || {};
   const page = Math.max(1, parseInt(params.page || "1", 10) || 1);
-  const perPage = Math.min(100, Math.max(1, parseInt(params.per_page || "25", 10) || 25));
+  const perPageParam = params.per_page || params.limit || "25";
+  const perPage = Math.min(100, Math.max(1, parseInt(perPageParam, 10) || 25));
   const from = (page - 1) * perPage;
   const to = from + perPage - 1;
   const sortField = VALID_SORT_FIELDS.includes(params.sort) ? params.sort : "created_at";
@@ -36,11 +37,12 @@ export async function handleSearchItems(supabase, principal, context, vaultId, e
 
   // Tag filter: resolve item IDs that carry this tag
   let tagFilterIds = null;
-  if (params.tag) {
+  const tag = params.tag || params.tag_id;
+  if (tag) {
     const { data: taggedItems, error: tagError } = await supabase
       .from("publication_tags")
       .select("vault_publication_id")
-      .eq("tag_id", params.tag);
+      .eq("tag_id", tag);
 
     if (tagError) throw tagError;
 
@@ -79,6 +81,10 @@ export async function handleSearchItems(supabase, principal, context, vaultId, e
   if (params.year) {
     const yr = parseInt(params.year, 10);
     if (!isNaN(yr)) query = query.eq("year", yr);
+  }
+
+  if (params.doi) {
+    query = query.eq("doi", params.doi);
   }
 
   if (params.type) {

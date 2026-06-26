@@ -2095,6 +2095,10 @@ export async function handler(event) {
         response = await handleDisconnectGoogleDrive(supabase, principal, context);
       } else if (route.length === 6 && route[0] === "google-drive" && route[1] === "vaults" && route[3] === "items" && route[5] === "pdf" && event.httpMethod === "POST") {
         response = await handleUploadItemPdf(supabase, principal, context, event, route[2], route[4]);
+      } else if (route.length === 7 && route[0] === "google-drive" && route[1] === "vaults" && route[3] === "items" && route[5] === "pdf" && route[6] === "session" && event.httpMethod === "POST") {
+        response = await handleCreatePdfDriveSession(supabase, principal, context, route[2], route[4]);
+      } else if (route.length === 7 && route[0] === "google-drive" && route[1] === "vaults" && route[3] === "items" && route[5] === "pdf" && route[6] === "complete" && event.httpMethod === "POST") {
+        response = await handleCompletePdfDriveUpload(supabase, principal, context, event, route[2], route[4]);
       } else if (route.length === 3 && route[0] === "publications" && route[2] === "pdf" && event.httpMethod === "POST") {
         response = await handleUploadPublicationPdf(supabase, principal, context, event, route[1]);
       // ── V2 management routes ────────────────────────────────────────────────

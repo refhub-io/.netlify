@@ -88,6 +88,7 @@ describe("PDF upload handler errors", () => {
     expect(createDriveResumableSession).toHaveBeenCalledWith(expect.anything(), "user-test", {
       title: "Large Paper",
       year: 2026,
+      origin: "https://refhub.io",
     });
   });
 

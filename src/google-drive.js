@@ -488,6 +488,14 @@ export async function ensureGoogleDriveFolderForUser(supabase, userId) {
   return ensureGoogleDriveFolderWithAccessToken(supabase, userId, accessToken);
 }
 
+export function getAllowedBrowserOrigin(origin) {
+  if (!origin || !getConfig().allowedOrigins.includes(origin)) {
+    return null;
+  }
+
+  return origin;
+}
+
 export async function completeGoogleDriveLink(supabase, { state, code, error: oauthError }) {
   const payload = parseGoogleDriveState(state);
   const redirectUrl = new URL(normalizeReturnTo(payload.returnTo));
@@ -1059,7 +1067,7 @@ export async function uploadPdfToGoogleDriveForUser({
  * The caller (browser extension) will PUT the PDF bytes directly to that URL,
  * bypassing Netlify entirely — no body size limit, no IP-based CDN blocking.
  */
-export async function createDriveResumableSession(supabase, userId, { title, year }) {
+export async function createDriveResumableSession(supabase, userId, { title, year, origin } = {}) {
   const link = await getStoredLink(supabase, userId);
   if (!link) {
     return null;
@@ -1075,6 +1083,7 @@ export async function createDriveResumableSession(supabase, userId, { title, yea
       method: "POST",
       headers: {
         Authorization: `Bearer ${accessToken}`,
+        ...(getAllowedBrowserOrigin(origin) ? { Origin: origin } : {}),
         "Content-Type": "application/json",
         "X-Upload-Content-Type": "application/pdf",
       },

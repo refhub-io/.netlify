@@ -1718,6 +1718,7 @@ async function handleCreatePdfDriveSession(supabase, principal, context, vaultId
   const session = await createDriveResumableSession(supabase, principal.userId, {
     title: vaultPub.title,
     year: vaultPub.year,
+    origin: context.origin,
   });
 
   if (!session) {

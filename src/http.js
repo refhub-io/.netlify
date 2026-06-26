@@ -37,6 +37,7 @@ export function createRequestContext(event) {
       headers["x-forwarded-for"] ||
       null,
     userAgent: headers["user-agent"] || null,
+    origin: headers.origin || null,
   };
 }
 

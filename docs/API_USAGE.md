@@ -566,7 +566,7 @@ curl -s \
   https://refhub-api.netlify.app/api/v1/vaults/<VAULT_ID>/items/<ITEM_ID>/pdf
 ```
 
-The JSON source-URL variant remains available on the same route when `Content-Type: application/json` is used. Resumable Drive sessions are exposed at `/pdf/session` and `/pdf/complete`.
+The JSON source-URL variant remains available on the same route when `Content-Type: application/json` is used. Raw PDF bodies are capped at the smallest of `REFHUB_API_MAX_BODY_BYTES`, `GOOGLE_DRIVE_MAX_UPLOAD_BYTES`, and the Netlify synchronous Function payload ceiling (6 MiB). Larger PDFs should use the resumable Drive flow exposed at `/pdf/session` and `/pdf/complete`, which sends bytes directly from the browser to Google Drive.
 
 ### Export a vault as JSON
 

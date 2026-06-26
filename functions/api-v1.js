@@ -146,6 +146,75 @@ const SEMANTIC_SCHOLAR_CACHE_STALE_TTL_MS = 10 * 60 * 1000;
 const semanticScholarResponseCache = new Map();
 const semanticScholarRateLimitBuckets = new Map();
 
+const NETLIFY_SYNC_FUNCTION_BODY_LIMIT_BYTES = 6 * 1024 * 1024;
+
+function getSafeCorsHeaders(event) {
+  try {
+    return createCorsHeaders(event, getConfig().allowedOrigins);
+  } catch (error) {
+    console.error("RefHub API config error while building CORS headers", {
+      code: error?.code,
+      message: error?.message,
+    });
+    return createCorsHeaders(event, ["https://refhub.io", "http://localhost:3000"]);
+  }
+}
+
+function normalizeUploadSizeLimit(config = getConfig()) {
+  return Math.min(
+    config.maxBodyBytes,
+    config.googleDriveMaxUploadBytes,
+    NETLIFY_SYNC_FUNCTION_BODY_LIMIT_BYTES,
+  );
+}
+
+function getHeaderNumber(event, name) {
+  const raw = getHeader(event, name);
+  if (raw === null || raw === undefined || raw === "") {
+    return null;
+  }
+
+  const value = Number(raw);
+  return Number.isFinite(value) && value >= 0 ? value : null;
+}
+
+function isPdfUploadRoute(route, method) {
+  if (method !== "POST") {
+    return false;
+  }
+
+  return (
+    (route.length === 6 && route[0] === "google-drive" && route[1] === "vaults" && route[3] === "items" && route[5] === "pdf") ||
+    (route.length === 3 && route[0] === "publications" && route[2] === "pdf") ||
+    (route.length === 5 && route[0] === "vaults" && route[2] === "items" && route[4] === "pdf")
+  );
+}
+
+function pdfUploadTooLargeResponse(event, context) {
+  const contentType = getHeader(event, "content-type") || "";
+  if (!/application\/pdf|application\/octet-stream/i.test(contentType)) {
+    return null;
+  }
+
+  const limitBytes = normalizeUploadSizeLimit();
+  const contentLength = getHeaderNumber(event, "content-length");
+  if (contentLength !== null && contentLength > limitBytes) {
+    return errorResponse(
+      413,
+      "pdf_upload_too_large_for_api",
+      `PDF upload is ${contentLength} bytes, which exceeds the ${limitBytes} byte API upload limit. Use the /pdf/session resumable Google Drive upload flow for larger PDFs.`,
+      context.requestId,
+      {
+        content_length: contentLength,
+        limit_bytes: limitBytes,
+        resumable_session_path_suffix: "/pdf/session",
+      },
+    );
+  }
+
+  return null;
+}
+
 function toSafeErrorResponse(error, requestId) {
   if (error?.code === "google_drive_not_configured") {
     return errorResponse(
@@ -1438,6 +1507,18 @@ function getHeader(event, name) {
 }
 
 function decodePdfRequestBuffer(event) {
+  const tooLargeResponse = pdfUploadTooLargeResponse(event, { requestId: null });
+  if (tooLargeResponse) {
+    const parsed = JSON.parse(tooLargeResponse.body);
+    return {
+      ok: false,
+      status: tooLargeResponse.statusCode,
+      code: parsed.error.code,
+      message: parsed.error.message,
+      details: parsed.error.details,
+    };
+  }
+
   if (!event.body) {
     return { ok: false, status: 400, code: "missing_body", message: "Request body must be a PDF binary" };
   }
@@ -1451,9 +1532,19 @@ function decodePdfRequestBuffer(event) {
     ? Buffer.from(event.body, "base64")
     : Buffer.from(event.body, "binary");
 
-  const maxBytes = getConfig().googleDriveMaxUploadBytes;
+  const maxBytes = normalizeUploadSizeLimit();
   if (pdfBuffer.length > maxBytes) {
-    return { ok: false, status: 413, code: "pdf_too_large", message: `PDF exceeds upload limit (${maxBytes} bytes).` };
+    return {
+      ok: false,
+      status: 413,
+      code: "pdf_upload_too_large_for_api",
+      message: `PDF exceeds API upload limit (${maxBytes} bytes). Use the /pdf/session resumable Google Drive upload flow for larger PDFs.`,
+      details: {
+        content_length: pdfBuffer.length,
+        limit_bytes: maxBytes,
+        resumable_session_path_suffix: "/pdf/session",
+      },
+    };
   }
 
   if (pdfBuffer.length < 5 || pdfBuffer[0] !== 0x25 || pdfBuffer[1] !== 0x50 || pdfBuffer[2] !== 0x44 || pdfBuffer[3] !== 0x46 || pdfBuffer[4] !== 0x2d) {
@@ -1517,7 +1608,7 @@ async function handleUploadItemPdf(supabase, principal, context, event, vaultId,
   } else {
     const decoded = decodePdfRequestBuffer(event);
     if (!decoded.ok) {
-      return errorResponse(decoded.status, decoded.code, decoded.message, context.requestId);
+      return errorResponse(decoded.status, decoded.code, decoded.message, context.requestId, decoded.details);
     }
     pdfBuffer = decoded.pdfBuffer;
 
@@ -1571,7 +1662,7 @@ async function handleUploadPublicationPdf(supabase, principal, context, event, p
 
   const decoded = decodePdfRequestBuffer(event);
   if (!decoded.ok) {
-    return errorResponse(decoded.status, decoded.code, decoded.message, context.requestId);
+    return errorResponse(decoded.status, decoded.code, decoded.message, context.requestId, decoded.details);
   }
 
   console.log("[pdf-upload] received PDF for publication", { publicationId, bytes: decoded.pdfBuffer.length });
@@ -1910,7 +2001,7 @@ async function handleExportVault(supabase, principal, context, vaultId, event) {
 
 export async function handler(event) {
   const context = createRequestContext(event);
-  const corsHeaders = createCorsHeaders(event, getConfig().allowedOrigins);
+  const corsHeaders = getSafeCorsHeaders(event);
   let supabase = null;
   let principal = null;
   let response;
@@ -1934,6 +2025,12 @@ export async function handler(event) {
     }
 
     const route = getRouteSegments(event.path || "/");
+    if (isPdfUploadRoute(route, event.httpMethod)) {
+      const tooLargeResponse = pdfUploadTooLargeResponse(event, context);
+      if (tooLargeResponse) {
+        return withCors(tooLargeResponse, corsHeaders);
+      }
+    }
 
     if (route.length === 2 && route[0] === "google-drive" && route[1] === "callback" && event.httpMethod === "GET") {
       return withCors(await handleGoogleDriveCallback(context, event), corsHeaders);

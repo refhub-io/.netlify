@@ -3,7 +3,7 @@ import path from "node:path";
 
 const DEFAULT_MAX_BULK_ITEMS = 50;
 const DEFAULT_MAX_BODY_BYTES = 50 * 1024 * 1024;
-const DEFAULT_ALLOWED_ORIGINS = ["https://refhub.io", "http://localhost:3000"];
+const DEFAULT_ALLOWED_ORIGINS = ["https://refhub.io", "http://localhost:3000", "http://localhost:5173", "http://localhost:8081"];
 const DEFAULT_SEMANTIC_SCHOLAR_RATE_LIMIT_MAX_REQUESTS = 60;
 const DEFAULT_SEMANTIC_SCHOLAR_RATE_LIMIT_WINDOW_MS = 60 * 1000;
 const DEFAULT_SEMANTIC_SCHOLAR_TIMEOUT_MS = 8000;

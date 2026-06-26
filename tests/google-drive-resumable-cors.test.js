@@ -79,11 +79,11 @@ describe("Google Drive resumable session CORS origin", () => {
     await createDriveResumableSession(makeSupabase(), "user-test", {
       title: "Large Paper",
       year: 2026,
-      origin: "http://localhost:5173",
+      origin: "http://localhost:8081",
     });
 
     const uploadCall = fetchMock.mock.calls.find(([url]) => String(url).includes("/upload/drive/v3/files"));
-    expect(uploadCall?.[1]?.headers?.Origin).toBe("http://localhost:5173");
+    expect(uploadCall?.[1]?.headers?.Origin).toBe("http://localhost:8081");
   });
 
   it("does not forward a disallowed browser Origin to Google", async () => {

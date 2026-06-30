@@ -388,11 +388,11 @@ auth: supabase session jwt only unless noted.
 
 `POST /api/v1/pdf-metadata` accepts `{ "source_url": "https://...pdf" }` plus optional `cookie_header`/`referer`, fetches the PDF server-side, and returns best-effort DOI/title/authors/year/journal metadata. It returns empty metadata with a `fetch_skipped` note when the source PDF is not server-accessible instead of throwing a hard 500.
 
-`POST /api/v1/vaults/:vaultId/items/:itemId/pdf` uploads or fetches a PDF for a vault item and stores it in linked Google Drive. Body can be raw `application/pdf` bytes or JSON with `source_url` plus optional `cookie_header`/`referer`. Raw PDF bodies are intentionally capped at the smallest of `REFHUB_API_MAX_BODY_BYTES`, `GOOGLE_DRIVE_MAX_UPLOAD_BYTES`, and the Netlify synchronous Function payload ceiling (6 MiB); larger PDFs should use the resumable session flow below so bytes go directly from browser to Google Drive.
+`POST /api/v1/vaults/:vaultId/items/:itemId/pdf` uploads or fetches a PDF for a vault item and stores it in linked Google Drive. Body can be raw `application/pdf` bytes or JSON with `source_url` plus optional `cookie_header`/`referer`. Raw PDF bodies are intentionally capped at the smallest of `REFHUB_API_MAX_BODY_BYTES`, `GOOGLE_DRIVE_MAX_UPLOAD_BYTES`, and the Netlify synchronous Function payload ceiling (6 MiB); larger API-key clients should use the resumable session flow below so bytes go directly from the client to Google Drive.
 
-`POST /api/v1/vaults/:vaultId/items/:itemId/pdf/session` creates a browser-side Google Drive resumable upload session. The API forwards the validated request `Origin` to Google when creating the session so browser-direct PUTs receive matching Drive CORS headers. If `REFHUB_API_ALLOWED_ORIGINS` is set explicitly, include every dev origin you use, e.g. `http://localhost:8081`; arbitrary origins are not reflected.
+`POST /api/v1/vaults/:vaultId/items/:itemId/pdf/session` creates an API-key Google Drive resumable upload session. The CLI uploads the PDF bytes directly to the returned `upload_url`, then calls `/pdf/complete`. When used from browsers, the API forwards the validated request `Origin` to Google when creating the session so browser-direct PUTs receive matching Drive CORS headers. If `REFHUB_API_ALLOWED_ORIGINS` is set explicitly, include every dev origin you use, e.g. `http://localhost:8081`; arbitrary origins are not reflected.
 
-`POST /api/v1/vaults/:vaultId/items/:itemId/pdf/complete` records a browser-completed Drive upload. Body must include `file_id`; `web_view_link` and `source_url` are optional.
+`POST /api/v1/vaults/:vaultId/items/:itemId/pdf/complete` records a client-completed Drive upload. Body must include `file_id`; `web_view_link` and `source_url` are optional.
 
 ### `POST /api/v1/publications/:publicationId/pdf`
 

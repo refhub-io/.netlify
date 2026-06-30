@@ -1064,7 +1064,7 @@ export async function uploadPdfToGoogleDriveForUser({
 
 /**
  * Creates a Google Drive resumable upload session and returns the upload URL.
- * The caller (browser extension) will PUT the PDF bytes directly to that URL,
+ * The caller will PUT the PDF bytes directly to that URL,
  * bypassing Netlify entirely — no body size limit, no IP-based CDN blocking.
  */
 export async function createDriveResumableSession(supabase, userId, { title, year, origin } = {}) {
@@ -1111,7 +1111,7 @@ export async function createDriveResumableSession(supabase, userId, { title, yea
 
 /**
  * Records a browser-completed Drive upload in the database.
- * Called after the extension has PUT the bytes directly to the Drive upload URL.
+ * Called after the client has PUT the bytes directly to the Drive upload URL.
  */
 export async function recordBrowserDriveUpload(supabase, {
   userId,

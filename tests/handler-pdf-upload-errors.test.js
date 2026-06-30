@@ -148,6 +148,41 @@ describe("PDF upload handler errors", () => {
     expect(authenticateManagementUser).not.toHaveBeenCalled();
   });
 
+  it("keeps the API-key resumable PDF complete route under /vaults", async () => {
+    vi.mocked(authenticateApiKey).mockResolvedValue({
+      supabase: makeMockSupabaseMulti({
+        vaults: [{ data: { id: "vault-1", user_id: "user-test", visibility: "private" }, error: null }],
+        vault_publications: [{ data: { id: "item-1", original_publication_id: "pub-1" }, error: null }],
+      }),
+      principal: makeApiKeyPrincipal({ scopes: ["vaults:write"] }),
+    });
+    vi.mocked(recordBrowserDriveUpload).mockResolvedValue({
+      attempted: true,
+      stored: true,
+      provider: "google_drive",
+      fileId: "drive-file-1",
+      pdfUrl: "https://drive.example/view",
+      sourceUrl: null,
+    });
+
+    const res = await handler(makePdfEvent({
+      path: "/api/v1/vaults/vault-1/items/item-1/pdf/complete",
+      headers: { authorization: "Bearer rhk_test_secret", "content-type": "application/json" },
+      body: JSON.stringify({ file_id: "drive-file-1", web_view_link: "https://drive.example/view" }),
+    }));
+
+    expect(res.statusCode).toBe(200);
+    expect(authenticateApiKey).toHaveBeenCalledTimes(1);
+    expect(authenticateManagementUser).not.toHaveBeenCalled();
+    expect(recordBrowserDriveUpload).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+      userId: "user-test",
+      publicationId: "pub-1",
+      vaultPublicationId: "item-1",
+      fileId: "drive-file-1",
+      webViewLink: "https://drive.example/view",
+    }));
+  });
+
   it("preserves CORS when framework-level errors are converted to JSON", async () => {
     const event = makePdfEvent({ contentLength: 100, body: "%PDF-test" });
     const corsHeaders = createCorsHeaders(event, getConfig().allowedOrigins);

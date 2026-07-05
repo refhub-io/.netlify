@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
-import { pickPublicationFields, validateVaultTagIds, touchVaultUpdatedAt } from "../../src/routes/utils.js";
-import { makeMockSupabase } from "../helpers.js";
+import { pickPublicationFields, validateVaultTagIds, touchVaultUpdatedAt, attachDrivePdfUrls } from "../../src/routes/utils.js";
+import { makeMockSupabase, makeMockSupabaseMulti } from "../helpers.js";
 
 describe("pickPublicationFields", () => {
   it("picks only known fields", () => {
@@ -43,6 +43,52 @@ describe("validateVaultTagIds", () => {
     await expect(validateVaultTagIds(supabase, "v1", ["t1", "t2"])).rejects.toMatchObject({
       code: "invalid_tag_ids",
     });
+  });
+});
+
+describe("attachDrivePdfUrls", () => {
+  it("returns items unchanged (empty array) when given none", async () => {
+    const supabase = makeMockSupabase({});
+    expect(await attachDrivePdfUrls(supabase, [])).toEqual([]);
+  });
+
+  it("prefers the vault-specific asset over the canonical-publication fallback", async () => {
+    const supabase = makeMockSupabaseMulti({
+      publication_pdf_assets: [
+        { data: [{ vault_publication_id: "item1", stored_pdf_url: "https://drive.example/vault-copy" }], error: null },
+        { data: [{ publication_id: "pub1", stored_pdf_url: "https://drive.example/canonical-copy" }], error: null },
+      ],
+    });
+
+    const [result] = await attachDrivePdfUrls(supabase, [
+      { id: "item1", original_publication_id: "pub1", pdf_url: "https://journal.example/paper.pdf" },
+    ]);
+
+    expect(result.drive_pdf_url).toBe("https://drive.example/vault-copy");
+    expect(result.pdf_url).toBe("https://journal.example/paper.pdf");
+  });
+
+  it("falls back to the canonical-publication asset when no vault-specific copy exists", async () => {
+    const supabase = makeMockSupabaseMulti({
+      publication_pdf_assets: [
+        { data: [], error: null },
+        { data: [{ publication_id: "pub1", stored_pdf_url: "https://drive.example/canonical-copy" }], error: null },
+      ],
+    });
+
+    const [result] = await attachDrivePdfUrls(supabase, [{ id: "item1", original_publication_id: "pub1" }]);
+
+    expect(result.drive_pdf_url).toBe("https://drive.example/canonical-copy");
+  });
+
+  it("sets drive_pdf_url to null when no asset has been stored", async () => {
+    const supabase = makeMockSupabaseMulti({
+      publication_pdf_assets: [{ data: [], error: null }],
+    });
+
+    const [result] = await attachDrivePdfUrls(supabase, [{ id: "item1", original_publication_id: null }]);
+
+    expect(result.drive_pdf_url).toBeNull();
   });
 });
 

@@ -11,7 +11,7 @@
 import { API_SCOPES, requireScope, resolveVaultAccess } from "../auth.js";
 import { json, errorResponse, parseJsonBody } from "../http.js";
 import { getConfig } from "../config.js";
-import { VAULT_PUBLICATION_SELECT, pickPublicationFields, touchVaultUpdatedAt } from "./utils.js";
+import { VAULT_PUBLICATION_SELECT, pickPublicationFields, touchVaultUpdatedAt, attachDrivePdfUrls } from "./utils.js";
 
 // In-memory idempotency cache for bulk upsert (TTL: 5 min)
 const upsertIdempotencyCache = new Map();
@@ -39,8 +39,10 @@ export async function handleGetItem(supabase, principal, context, vaultId, itemI
   if (error) throw error;
   if (!item) return errorResponse(404, "item_not_found", "Item not found", context.requestId);
 
+  const [enrichedItem] = await attachDrivePdfUrls(supabase, [item]);
+
   return json(200, {
-    data: item,
+    data: enrichedItem,
     meta: { request_id: context.requestId, vault_id: vaultId },
   });
 }

@@ -100,6 +100,67 @@ export async function validateVaultTagIds(supabase, vaultId, tagIds) {
 }
 
 /**
+ * Enriches vault_publications rows with drive_pdf_url — the Google-Drive-
+ * stored copy of the PDF (publication_pdf_assets.stored_pdf_url) — kept
+ * separate from pdf_url (the publisher-hosted link entered/imported as
+ * bibliographic metadata). A Drive file is a storage asset, not metadata,
+ * and publication_pdf_assets is keyed per uploading user, so folding it
+ * into the shared pdf_url column would leak one user's private Drive link
+ * into a field every vault collaborator sees. This mirrors the same
+ * vault-then-canonical-publication lookup and field name the RefHub
+ * frontend uses when it queries publication_pdf_assets directly.
+ */
+export async function attachDrivePdfUrls(supabase, items) {
+  if (!items || items.length === 0) return items ?? [];
+
+  const vaultPublicationIds = items.map((item) => item.id).filter(Boolean);
+  const originalPublicationIds = [
+    ...new Set(items.map((item) => item.original_publication_id).filter(Boolean)),
+  ];
+
+  const [vaultAssetsResult, publicationAssetsResult] = await Promise.all([
+    vaultPublicationIds.length > 0
+      ? supabase
+          .from("publication_pdf_assets")
+          .select("vault_publication_id, stored_pdf_url")
+          .in("vault_publication_id", vaultPublicationIds)
+          .eq("storage_provider", "google_drive")
+          .eq("status", "stored")
+      : Promise.resolve({ data: [], error: null }),
+    originalPublicationIds.length > 0
+      ? supabase
+          .from("publication_pdf_assets")
+          .select("publication_id, stored_pdf_url")
+          .in("publication_id", originalPublicationIds)
+          .is("vault_publication_id", null)
+          .eq("storage_provider", "google_drive")
+          .eq("status", "stored")
+      : Promise.resolve({ data: [], error: null }),
+  ]);
+
+  if (vaultAssetsResult.error) throw vaultAssetsResult.error;
+  if (publicationAssetsResult.error) throw publicationAssetsResult.error;
+
+  const byPublicationId = new Map();
+  for (const row of publicationAssetsResult.data || []) {
+    if (row.publication_id) byPublicationId.set(row.publication_id, row.stored_pdf_url ?? null);
+  }
+
+  const byVaultPublicationId = new Map();
+  for (const row of vaultAssetsResult.data || []) {
+    if (row.vault_publication_id) byVaultPublicationId.set(row.vault_publication_id, row.stored_pdf_url ?? null);
+  }
+
+  return items.map((item) => ({
+    ...item,
+    drive_pdf_url:
+      byVaultPublicationId.get(item.id) ??
+      (item.original_publication_id ? byPublicationId.get(item.original_publication_id) : null) ??
+      null,
+  }));
+}
+
+/**
  * Touch vaults.updated_at so the existing DB trigger (update_vaults_updated_at)
  * fires and stamps now() — making all item/tag/relation writes reflect on
  * the vault's modification timestamp.

@@ -496,6 +496,8 @@ scope: `vaults:write` · permission: editor.
 
 scope: `vaults:write` · permission: editor. partial update. if `tag_ids` is present it replaces the full tag set.
 
+bibliographic fields (everything in the publication field set except `notes`) are rolled up atomically to the canonical `publications` row and every sibling `vault_publications` copy of the same paper in other vaults — matching the RefHub frontend's own propagation rule. `notes` and `tag_ids` are vault-local and never propagate. The rollup is all-or-nothing: on failure, nothing is applied and the response is `502 publication_rollup_failed` with the underlying database error in `details.postgres_message` — never a partial update reported as success.
+
 ### `GET /api/v1/vaults/:vaultId/export?format=json|bibtex`
 
 scope: `vaults:export` · permission: viewer. supported formats: `json` · `bibtex`.

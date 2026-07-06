@@ -105,7 +105,7 @@ describe("PDF upload handler errors", () => {
       stored: true,
       provider: "google_drive",
       fileId: "drive-file-1",
-      pdfUrl: "https://drive.example/view",
+      driveUrl: "https://drive.example/view",
       sourceUrl: null,
     });
 
@@ -161,7 +161,7 @@ describe("PDF upload handler errors", () => {
       stored: true,
       provider: "google_drive",
       fileId: "drive-file-1",
-      pdfUrl: "https://drive.example/view",
+      driveUrl: "https://drive.example/view",
       sourceUrl: null,
     });
 

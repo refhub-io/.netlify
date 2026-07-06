@@ -394,6 +394,8 @@ auth: supabase session jwt only unless noted.
 
 `POST /api/v1/vaults/:vaultId/items/:itemId/pdf/complete` records a client-completed Drive upload. Body must include `file_id`; `web_view_link` and `source_url` are optional.
 
+All three upload routes above return the stored Drive link as `driveUrl` in their response `data` (previously `pdfUrl`) — renamed to stop colliding in name with the unrelated `pdf_url` publication field (the publisher-hosted link). Matches the corresponding rename in the RefHub frontend, CLI, and skill clients.
+
 ### `POST /api/v1/publications/:publicationId/pdf`
 
 auth: supabase session jwt only. uploads a PDF for a publication the authenticated user owns and stores it in their linked Google Drive. records the asset in `publication_pdf_assets`.
@@ -413,7 +415,7 @@ request body: raw `application/pdf` bytes.
     "fileId": "1BcnjrInjOGsnM142vNlg4KNMriooAc9u",
     "folderId": "1-HxdtCdUxv03KEN-syenBc18fvnRl9EW",
     "folderName": "refhub",
-    "pdfUrl": "https://drive.google.com/file/d/.../view?usp=drivesdk",
+    "driveUrl": "https://drive.google.com/file/d/.../view?usp=drivesdk",
     "sourceUrl": null
   },
   "meta": { "request_id": "uuid" }

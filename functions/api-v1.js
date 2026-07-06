@@ -146,8 +146,6 @@ const SEMANTIC_SCHOLAR_CACHE_STALE_TTL_MS = 10 * 60 * 1000;
 const semanticScholarResponseCache = new Map();
 const semanticScholarRateLimitBuckets = new Map();
 
-const NETLIFY_SYNC_FUNCTION_BODY_LIMIT_BYTES = 6 * 1024 * 1024;
-
 function getSafeCorsHeaders(event) {
   try {
     return createCorsHeaders(event, getConfig().allowedOrigins);
@@ -160,59 +158,36 @@ function getSafeCorsHeaders(event) {
   }
 }
 
-function normalizeUploadSizeLimit(config = getConfig()) {
-  return Math.min(
-    config.maxBodyBytes,
-    config.googleDriveMaxUploadBytes,
-    NETLIFY_SYNC_FUNCTION_BODY_LIMIT_BYTES,
-  );
-}
-
-function getHeaderNumber(event, name) {
-  const raw = getHeader(event, name);
-  if (raw === null || raw === undefined || raw === "") {
-    return null;
-  }
-
-  const value = Number(raw);
-  return Number.isFinite(value) && value >= 0 ? value : null;
-}
-
-function isPdfUploadRoute(route, method) {
+// Raw application/pdf bodies are no longer accepted anywhere — client-held bytes
+// always go through the resumable session flow (PUT directly to Google Drive,
+// bypassing this function entirely), regardless of size. This only matches the
+// vault-item /pdf route, which still accepts a JSON { source_url } body for
+// server-side fetches; the publications/pdf route was raw-bytes-only and has
+// been replaced outright by /publications/:publicationId/pdf/session + /complete.
+function isVaultItemPdfUploadRoute(route, method) {
   if (method !== "POST") {
     return false;
   }
 
   return (
     (route.length === 6 && route[0] === "google-drive" && route[1] === "vaults" && route[3] === "items" && route[5] === "pdf") ||
-    (route.length === 3 && route[0] === "publications" && route[2] === "pdf") ||
     (route.length === 5 && route[0] === "vaults" && route[2] === "items" && route[4] === "pdf")
   );
 }
 
-function pdfUploadTooLargeResponse(event, context) {
+function rejectRawPdfBodyIfPresent(event, context) {
   const contentType = getHeader(event, "content-type") || "";
   if (!/application\/pdf|application\/octet-stream/i.test(contentType)) {
     return null;
   }
 
-  const limitBytes = normalizeUploadSizeLimit();
-  const contentLength = getHeaderNumber(event, "content-length");
-  if (contentLength !== null && contentLength > limitBytes) {
-    return errorResponse(
-      413,
-      "pdf_upload_too_large_for_api",
-      `PDF upload is ${contentLength} bytes, which exceeds the ${limitBytes} byte API upload limit. Use the /pdf/session resumable Google Drive upload flow for larger PDFs.`,
-      context.requestId,
-      {
-        content_length: contentLength,
-        limit_bytes: limitBytes,
-        resumable_session_path_suffix: "/pdf/session",
-      },
-    );
-  }
-
-  return null;
+  return errorResponse(
+    410,
+    "raw_pdf_upload_removed",
+    "Raw application/pdf request bodies are no longer accepted on this route. Use the resumable Drive upload flow instead: POST .../pdf/session, PUT the bytes to the returned upload_url, then POST .../pdf/complete.",
+    context.requestId,
+    { resumable_session_path_suffix: "/pdf/session" },
+  );
 }
 
 function toSafeErrorResponse(error, requestId) {
@@ -1506,54 +1481,6 @@ function getHeader(event, name) {
   return null;
 }
 
-function decodePdfRequestBuffer(event) {
-  const tooLargeResponse = pdfUploadTooLargeResponse(event, { requestId: null });
-  if (tooLargeResponse) {
-    const parsed = JSON.parse(tooLargeResponse.body);
-    return {
-      ok: false,
-      status: tooLargeResponse.statusCode,
-      code: parsed.error.code,
-      message: parsed.error.message,
-      details: parsed.error.details,
-    };
-  }
-
-  if (!event.body) {
-    return { ok: false, status: 400, code: "missing_body", message: "Request body must be a PDF binary" };
-  }
-
-  const contentType = getHeader(event, "content-type") || "";
-  if (contentType && !/application\/pdf|application\/octet-stream/i.test(contentType)) {
-    return { ok: false, status: 415, code: "unsupported_media_type", message: "Request body must be application/pdf" };
-  }
-
-  const pdfBuffer = event.isBase64Encoded
-    ? Buffer.from(event.body, "base64")
-    : Buffer.from(event.body, "binary");
-
-  const maxBytes = normalizeUploadSizeLimit();
-  if (pdfBuffer.length > maxBytes) {
-    return {
-      ok: false,
-      status: 413,
-      code: "pdf_upload_too_large_for_api",
-      message: `PDF exceeds API upload limit (${maxBytes} bytes). Use the /pdf/session resumable Google Drive upload flow for larger PDFs.`,
-      details: {
-        content_length: pdfBuffer.length,
-        limit_bytes: maxBytes,
-        resumable_session_path_suffix: "/pdf/session",
-      },
-    };
-  }
-
-  if (pdfBuffer.length < 5 || pdfBuffer[0] !== 0x25 || pdfBuffer[1] !== 0x50 || pdfBuffer[2] !== 0x44 || pdfBuffer[3] !== 0x46 || pdfBuffer[4] !== 0x2d) {
-    return { ok: false, status: 400, code: "invalid_pdf", message: "Request body does not appear to be a valid PDF" };
-  }
-
-  return { ok: true, pdfBuffer };
-}
-
 function canWriteWithPrincipal(principal) {
   return principal.authType === "management_user" || requireScope(principal, API_SCOPES.WRITE);
 }
@@ -1579,41 +1506,25 @@ async function handleUploadItemPdf(supabase, principal, context, event, vaultId,
     return errorResponse(404, "item_not_found", "Vault item not found", context.requestId);
   }
 
-  const contentType = event.headers?.["content-type"] || event.headers?.["Content-Type"] || "";
-  let pdfBuffer = null;
-  let sourceUrl = null;
-  let cookieHeader = null;
-  let referer = null;
-
-  if (/application\/json/i.test(contentType)) {
-    const parsedBody = parseJsonBody(event);
-    if (!parsedBody.ok) {
-      return errorResponse(400, "invalid_json", "Request body must be valid JSON", context.requestId);
-    }
-
-    sourceUrl = typeof parsedBody.value?.source_url === "string" ? parsedBody.value.source_url.trim() : "";
-    cookieHeader = typeof parsedBody.value?.cookie_header === "string" ? parsedBody.value.cookie_header.trim() : "";
-    referer = typeof parsedBody.value?.referer === "string" ? parsedBody.value.referer.trim() : "";
-    if (!sourceUrl) {
-      return errorResponse(400, "invalid_source_url", "Body must include a non-empty source_url", context.requestId);
-    }
-
-    console.log("[pdf-upload] received source-url PDF request for vault_pub", {
-      itemId,
-      vaultId,
-      sourceUrl,
-      hasCookieHeader: Boolean(cookieHeader),
-      referer,
-    });
-  } else {
-    const decoded = decodePdfRequestBuffer(event);
-    if (!decoded.ok) {
-      return errorResponse(decoded.status, decoded.code, decoded.message, context.requestId, decoded.details);
-    }
-    pdfBuffer = decoded.pdfBuffer;
-
-    console.log("[pdf-upload] received PDF for vault_pub", { itemId, vaultId, bytes: pdfBuffer.length });
+  const parsedBody = parseJsonBody(event);
+  if (!parsedBody.ok) {
+    return errorResponse(400, "invalid_json", "Request body must be valid JSON", context.requestId);
   }
+
+  const sourceUrl = typeof parsedBody.value?.source_url === "string" ? parsedBody.value.source_url.trim() : "";
+  const cookieHeader = typeof parsedBody.value?.cookie_header === "string" ? parsedBody.value.cookie_header.trim() : "";
+  const referer = typeof parsedBody.value?.referer === "string" ? parsedBody.value.referer.trim() : "";
+  if (!sourceUrl) {
+    return errorResponse(400, "invalid_source_url", "Body must include a non-empty source_url", context.requestId);
+  }
+
+  console.log("[pdf-upload] received source-url PDF request for vault_pub", {
+    itemId,
+    vaultId,
+    sourceUrl,
+    hasCookieHeader: Boolean(cookieHeader),
+    referer,
+  });
 
   const result = await uploadPdfToGoogleDriveForUser({
     supabase,
@@ -1626,7 +1537,7 @@ async function handleUploadItemPdf(supabase, principal, context, event, vaultId,
     sourceUrl,
     cookieHeader,
     referer,
-    pdfBuffer,
+    pdfBuffer: null,
   });
 
   if (!result.stored) {
@@ -1644,14 +1555,14 @@ async function handleUploadItemPdf(supabase, principal, context, event, vaultId,
   });
 }
 
-async function handleUploadPublicationPdf(supabase, principal, context, event, publicationId) {
+async function handleCreatePublicationPdfDriveSession(supabase, principal, context, publicationId) {
   if (!canWriteWithPrincipal(principal)) {
     return errorResponse(403, "missing_scope", "Scope vaults:write is required", context.requestId);
   }
 
   const { data: publication, error: publicationError } = await supabase
     .from("publications")
-    .select("id, user_id, title, year, doi")
+    .select("id, title, year")
     .eq("id", publicationId)
     .eq("user_id", principal.userId)
     .single();
@@ -1660,38 +1571,55 @@ async function handleUploadPublicationPdf(supabase, principal, context, event, p
     return errorResponse(404, "publication_not_found", "Publication not found", context.requestId);
   }
 
-  const decoded = decodePdfRequestBuffer(event);
-  if (!decoded.ok) {
-    return errorResponse(decoded.status, decoded.code, decoded.message, context.requestId, decoded.details);
+  const session = await createDriveResumableSession(supabase, principal.userId, {
+    title: publication.title,
+    year: publication.year,
+    origin: context.origin,
+  });
+
+  if (!session) {
+    return errorResponse(503, "drive_not_linked", "Google Drive is not linked for this account", context.requestId);
   }
 
-  console.log("[pdf-upload] received PDF for publication", { publicationId, bytes: decoded.pdfBuffer.length });
+  return json(200, { data: session, meta: { request_id: context.requestId } });
+}
 
-  const result = await uploadPdfToGoogleDriveForUser({
-    supabase,
+async function handleCompletePublicationPdfDriveUpload(supabase, principal, context, event, publicationId) {
+  if (!canWriteWithPrincipal(principal)) {
+    return errorResponse(403, "missing_scope", "Scope vaults:write is required", context.requestId);
+  }
+
+  const { data: publication, error: publicationError } = await supabase
+    .from("publications")
+    .select("id")
+    .eq("id", publicationId)
+    .eq("user_id", principal.userId)
+    .single();
+
+  if (publicationError || !publication) {
+    return errorResponse(404, "publication_not_found", "Publication not found", context.requestId);
+  }
+
+  const parsedBody = parseJsonBody(event);
+  if (!parsedBody.ok) {
+    return errorResponse(400, "invalid_json", "Request body must be valid JSON", context.requestId);
+  }
+
+  const { file_id, web_view_link, source_url } = parsedBody.value || {};
+  if (!file_id) {
+    return errorResponse(400, "missing_file_id", "Body must include file_id", context.requestId);
+  }
+
+  const result = await recordBrowserDriveUpload(supabase, {
     userId: principal.userId,
     publicationId: publication.id,
     vaultPublicationId: null,
-    title: publication.title,
-    year: publication.year,
-    doi: publication.doi,
-    sourceUrl: null,
-    pdfBuffer: decoded.pdfBuffer,
+    fileId: file_id,
+    webViewLink: web_view_link || null,
+    sourceUrl: source_url || null,
   });
 
-  if (!result.stored) {
-    return errorResponse(
-      502,
-      result.code || "drive_upload_failed",
-      result.message || "PDF upload to Drive failed",
-      context.requestId,
-    );
-  }
-
-  return json(200, {
-    data: result,
-    meta: { request_id: context.requestId },
-  });
+  return json(200, { data: result, meta: { request_id: context.requestId } });
 }
 
 async function handleCreatePdfDriveSession(supabase, principal, context, vaultId, itemId) {
@@ -2026,10 +1954,10 @@ export async function handler(event) {
     }
 
     const route = getRouteSegments(event.path || "/");
-    if (isPdfUploadRoute(route, event.httpMethod)) {
-      const tooLargeResponse = pdfUploadTooLargeResponse(event, context);
-      if (tooLargeResponse) {
-        return withCors(tooLargeResponse, corsHeaders);
+    if (isVaultItemPdfUploadRoute(route, event.httpMethod)) {
+      const rawBodyRejection = rejectRawPdfBodyIfPresent(event, context);
+      if (rawBodyRejection) {
+        return withCors(rawBodyRejection, corsHeaders);
       }
     }
 
@@ -2100,8 +2028,10 @@ export async function handler(event) {
         response = await handleCreatePdfDriveSession(supabase, principal, context, route[2], route[4]);
       } else if (route.length === 7 && route[0] === "google-drive" && route[1] === "vaults" && route[3] === "items" && route[5] === "pdf" && route[6] === "complete" && event.httpMethod === "POST") {
         response = await handleCompletePdfDriveUpload(supabase, principal, context, event, route[2], route[4]);
-      } else if (route.length === 3 && route[0] === "publications" && route[2] === "pdf" && event.httpMethod === "POST") {
-        response = await handleUploadPublicationPdf(supabase, principal, context, event, route[1]);
+      } else if (route.length === 4 && route[0] === "publications" && route[2] === "pdf" && route[3] === "session" && event.httpMethod === "POST") {
+        response = await handleCreatePublicationPdfDriveSession(supabase, principal, context, route[1]);
+      } else if (route.length === 4 && route[0] === "publications" && route[2] === "pdf" && route[3] === "complete" && event.httpMethod === "POST") {
+        response = await handleCompletePublicationPdfDriveUpload(supabase, principal, context, event, route[1]);
       // ── V2 management routes ────────────────────────────────────────────────
       } else if (route.length === 1 && route[0] === "audit" && event.httpMethod === "GET") {
         response = await handleListGlobalAudit(supabase, principal, context, event);

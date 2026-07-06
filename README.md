@@ -31,7 +31,10 @@ POST   /api/v1/google-drive/folder
 DELETE /api/v1/google-drive
 GET    /api/v1/google-drive/callback  ← oauth callback, no bearer token
 POST   /api/v1/google-drive/vaults/:vaultId/items/:itemId/pdf
-POST   /api/v1/publications/:publicationId/pdf
+POST   /api/v1/google-drive/vaults/:vaultId/items/:itemId/pdf/session
+POST   /api/v1/google-drive/vaults/:vaultId/items/:itemId/pdf/complete
+POST   /api/v1/publications/:publicationId/pdf/session
+POST   /api/v1/publications/:publicationId/pdf/complete
 
 GET    /api/v1/audit
 ```
@@ -388,19 +391,21 @@ auth: supabase session jwt only unless noted.
 
 `POST /api/v1/pdf-metadata` accepts `{ "source_url": "https://...pdf" }` plus optional `cookie_header`/`referer`, fetches the PDF server-side, and returns best-effort DOI/title/authors/year/journal metadata. It returns empty metadata with a `fetch_skipped` note when the source PDF is not server-accessible instead of throwing a hard 500.
 
-`POST /api/v1/vaults/:vaultId/items/:itemId/pdf` uploads or fetches a PDF for a vault item and stores it in linked Google Drive. Body can be raw `application/pdf` bytes or JSON with `source_url` plus optional `cookie_header`/`referer`. Raw PDF bodies are intentionally capped at the smallest of `REFHUB_API_MAX_BODY_BYTES`, `GOOGLE_DRIVE_MAX_UPLOAD_BYTES`, and the Netlify synchronous Function payload ceiling (6 MiB); larger API-key clients should use the resumable session flow below so bytes go directly from the client to Google Drive.
+`POST /api/v1/vaults/:vaultId/items/:itemId/pdf` uploads or fetches a PDF for a vault item and stores it in linked Google Drive. Body must be JSON with `source_url` plus optional `cookie_header`/`referer` — the backend fetches the PDF server-side (e.g. using institutional-access cookies), so this is not subject to any client-payload size limit. **Raw `application/pdf` request bodies are no longer accepted on this route** — any client that already holds the PDF bytes locally must use the resumable session flow below instead, regardless of file size. A raw PDF/octet-stream body sent here returns `410 raw_pdf_upload_removed`.
 
-`POST /api/v1/vaults/:vaultId/items/:itemId/pdf/session` creates an API-key Google Drive resumable upload session. The CLI uploads the PDF bytes directly to the returned `upload_url`, then calls `/pdf/complete`. When used from browsers, the API forwards the validated request `Origin` to Google when creating the session so browser-direct PUTs receive matching Drive CORS headers. If `REFHUB_API_ALLOWED_ORIGINS` is set explicitly, include every dev origin you use, e.g. `http://localhost:8081`; arbitrary origins are not reflected.
+`POST /api/v1/vaults/:vaultId/items/:itemId/pdf/session` creates a Google Drive resumable upload session — the **only** way to upload PDF bytes a client already holds locally, for any file size. The client PUTs the PDF bytes directly to the returned `upload_url`, then calls `/pdf/complete`. When used from browsers, the API forwards the validated request `Origin` to Google when creating the session so browser-direct PUTs receive matching Drive CORS headers. If `REFHUB_API_ALLOWED_ORIGINS` is set explicitly, include every dev origin you use, e.g. `http://localhost:8081`; arbitrary origins are not reflected.
 
 `POST /api/v1/vaults/:vaultId/items/:itemId/pdf/complete` records a client-completed Drive upload. Body must include `file_id`; `web_view_link` and `source_url` are optional.
 
-All three upload routes above return the stored Drive link as `driveUrl` in their response `data` (previously `pdfUrl`) — renamed to stop colliding in name with the unrelated `pdf_url` publication field (the publisher-hosted link). Matches the corresponding rename in the RefHub frontend, CLI, and skill clients.
+All upload routes on this page return the stored Drive link as `driveUrl` in their response `data` (previously `pdfUrl`) — renamed to stop colliding in name with the unrelated `pdf_url` publication field (the publisher-hosted link). Matches the corresponding rename in the RefHub frontend, CLI, and skill clients.
 
-### `POST /api/v1/publications/:publicationId/pdf`
+### Publication-level PDF upload
 
-auth: supabase session jwt only. uploads a PDF for a publication the authenticated user owns and stores it in their linked Google Drive. records the asset in `publication_pdf_assets`.
+auth: supabase session jwt only. Uploads a PDF for a publication the authenticated user owns directly (not scoped to a specific vault item) and stores it in their linked Google Drive. Records the asset in `publication_pdf_assets`. Mirrors the vault-item resumable flow exactly — there is no raw-bytes variant of this route.
 
-request body: raw `application/pdf` bytes.
+`POST /api/v1/publications/:publicationId/pdf/session` creates the resumable upload session.
+
+`POST /api/v1/publications/:publicationId/pdf/complete` records a client-completed Drive upload. Body must include `file_id`; `web_view_link` and `source_url` are optional.
 
 - publication must be owned by the authenticated user
 - google drive must be linked for the account

@@ -15,11 +15,12 @@ vi.mock("../src/google-drive.js", async (importOriginal) => {
     ...actual,
     createDriveResumableSession: vi.fn(),
     recordBrowserDriveUpload: vi.fn(),
+    uploadPdfToGoogleDriveForUser: vi.fn(),
   };
 });
 
 import { authenticateApiKey, authenticateManagementUser } from "../src/auth.js";
-import { createDriveResumableSession, recordBrowserDriveUpload } from "../src/google-drive.js";
+import { createDriveResumableSession, recordBrowserDriveUpload, uploadPdfToGoogleDriveForUser } from "../src/google-drive.js";
 import { getConfig } from "../src/config.js";
 import { createCorsHeaders, errorResponse, withCors } from "../src/http.js";
 import { handler } from "../functions/api-v1.js";
@@ -33,7 +34,6 @@ function makePdfEvent(overrides = {}) {
       origin: "https://refhub.io",
       authorization: "Bearer rhk_test_secret",
       "content-type": "application/pdf",
-      "content-length": String(overrides.contentLength ?? 0),
       ...(overrides.headers ?? {}),
     },
     queryStringParameters: null,
@@ -54,16 +54,47 @@ describe("PDF upload handler errors", () => {
     vi.mocked(authenticateApiKey).mockReset();
     vi.mocked(createDriveResumableSession).mockReset();
     vi.mocked(recordBrowserDriveUpload).mockReset();
+    vi.mocked(uploadPdfToGoogleDriveForUser).mockReset();
   });
 
-  it("rejects raw PDF uploads above the API-safe limit with JSON and CORS before auth", async () => {
-    const res = await handler(makePdfEvent({ contentLength: 7_524_181 }));
+  it("rejects any raw application/pdf body with a structured 410, before auth, regardless of size", async () => {
+    const res = await handler(makePdfEvent({}));
 
-    expect(res.statusCode).toBe(413);
+    expect(res.statusCode).toBe(410);
     expect(res.headers["access-control-allow-origin"]).toBe("https://refhub.io");
     expect(res.headers["content-type"]).toContain("application/json");
-    expect(JSON.parse(res.body).error.code).toBe("pdf_upload_too_large_for_api");
+    expect(JSON.parse(res.body).error.code).toBe("raw_pdf_upload_removed");
     expect(authenticateApiKey).not.toHaveBeenCalled();
+  });
+
+  it("still accepts a JSON source_url body on the vault-item /pdf route", async () => {
+    vi.mocked(authenticateApiKey).mockResolvedValue({
+      supabase: makeMockSupabaseMulti({
+        vaults: [{ data: { id: "vault-1", user_id: "user-test", visibility: "private" }, error: null }],
+        vault_shares: [{ data: null, error: null }],
+        vault_publications: [{ data: { id: "item-1", original_publication_id: "pub-1", title: "Paper", year: 2026, doi: null }, error: null }],
+      }),
+      principal: makeApiKeyPrincipal({ scopes: ["vaults:write"] }),
+    });
+    vi.mocked(uploadPdfToGoogleDriveForUser).mockResolvedValue({
+      attempted: true,
+      stored: true,
+      provider: "google_drive",
+      fileId: "drive-file-1",
+      driveUrl: "https://drive.example/view",
+      sourceUrl: "https://source.example/paper.pdf",
+    });
+
+    const res = await handler(makePdfEvent({
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ source_url: "https://source.example/paper.pdf" }),
+    }));
+
+    expect(res.statusCode).toBe(200);
+    expect(uploadPdfToGoogleDriveForUser).toHaveBeenCalledWith(expect.objectContaining({
+      sourceUrl: "https://source.example/paper.pdf",
+      pdfBuffer: null,
+    }));
   });
 
   it("creates resumable PDF sessions on the browser google-drive route with management auth", async () => {
@@ -183,8 +214,84 @@ describe("PDF upload handler errors", () => {
     }));
   });
 
+  it("creates resumable PDF sessions on the publication-level route", async () => {
+    vi.mocked(authenticateManagementUser).mockResolvedValue({
+      supabase: makeMockSupabase({
+        publications: { data: { id: "pub-1", title: "Solo Paper", year: 2025 }, error: null },
+      }),
+      principal: makeManagementPrincipal({ userId: "user-test" }),
+    });
+    vi.mocked(createDriveResumableSession).mockResolvedValue({ upload_url: "https://drive.example/upload", file_name: "Solo Paper.pdf" });
+
+    const res = await handler(makePdfEvent({
+      path: "/api/v1/publications/pub-1/pdf/session",
+      headers: { authorization: "Bearer supabase-session-jwt", "content-type": "application/json" },
+      body: null,
+    }));
+
+    expect(res.statusCode).toBe(200);
+    expect(authenticateManagementUser).toHaveBeenCalledTimes(1);
+    expect(authenticateApiKey).not.toHaveBeenCalled();
+    expect(createDriveResumableSession).toHaveBeenCalledWith(expect.anything(), "user-test", {
+      title: "Solo Paper",
+      year: 2025,
+      origin: "https://refhub.io",
+    });
+  });
+
+  it("records completed resumable PDF uploads on the publication-level route", async () => {
+    vi.mocked(authenticateManagementUser).mockResolvedValue({
+      supabase: makeMockSupabase({
+        publications: { data: { id: "pub-1" }, error: null },
+      }),
+      principal: makeManagementPrincipal({ userId: "user-test" }),
+    });
+    vi.mocked(recordBrowserDriveUpload).mockResolvedValue({
+      attempted: true,
+      stored: true,
+      provider: "google_drive",
+      fileId: "drive-file-1",
+      driveUrl: "https://drive.example/view",
+      sourceUrl: null,
+    });
+
+    const res = await handler(makePdfEvent({
+      path: "/api/v1/publications/pub-1/pdf/complete",
+      headers: { authorization: "Bearer supabase-session-jwt", "content-type": "application/json" },
+      body: JSON.stringify({ file_id: "drive-file-1", web_view_link: "https://drive.example/view" }),
+    }));
+
+    expect(res.statusCode).toBe(200);
+    expect(recordBrowserDriveUpload).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+      userId: "user-test",
+      publicationId: "pub-1",
+      vaultPublicationId: null,
+      fileId: "drive-file-1",
+      webViewLink: "https://drive.example/view",
+    }));
+  });
+
+  it("404s the publication-level session route for a publication the caller does not own", async () => {
+    vi.mocked(authenticateManagementUser).mockResolvedValue({
+      supabase: makeMockSupabase({
+        publications: { data: null, error: null },
+      }),
+      principal: makeManagementPrincipal({ userId: "user-test" }),
+    });
+
+    const res = await handler(makePdfEvent({
+      path: "/api/v1/publications/not-mine/pdf/session",
+      headers: { authorization: "Bearer supabase-session-jwt", "content-type": "application/json" },
+      body: null,
+    }));
+
+    expect(res.statusCode).toBe(404);
+    expect(JSON.parse(res.body).error.code).toBe("publication_not_found");
+    expect(createDriveResumableSession).not.toHaveBeenCalled();
+  });
+
   it("preserves CORS when framework-level errors are converted to JSON", async () => {
-    const event = makePdfEvent({ contentLength: 100, body: "%PDF-test" });
+    const event = makePdfEvent({ body: "%PDF-test" });
     const corsHeaders = createCorsHeaders(event, getConfig().allowedOrigins);
 
     const res = withCors(errorResponse(500, "internal_error", "Unexpected server error", "req-test"), corsHeaders);

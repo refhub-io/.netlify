@@ -1015,13 +1015,15 @@ export async function uploadPdfToGoogleDriveForUser({
     const uploaded = await uploadDriveFile(accessToken, folder.folderId, filename, pdfBuffer);
     console.log("[drive] uploaded to Drive", { fileId: uploaded.id, filename, webViewLink: uploaded.webViewLink });
 
+    const driveUrl = uploaded.webViewLink || uploaded.webContentLink || null;
+
     await upsertVaultAndPublicationPdfAssetRecords(supabase, {
       user_id: userId,
       publication_id: publicationId,
       vault_publication_id: vaultPublicationId,
       storage_provider: "google_drive",
       source_pdf_url: resolvedSourceUrl,
-      stored_pdf_url: uploaded.webViewLink || uploaded.webContentLink || null,
+      stored_pdf_url: driveUrl,
       stored_file_id: uploaded.id,
       status: "stored",
       error_message: null,
@@ -1034,7 +1036,7 @@ export async function uploadPdfToGoogleDriveForUser({
       fileId: uploaded.id,
       folderId: folder.folderId,
       folderName: folder.folderName,
-      pdfUrl: uploaded.webViewLink || uploaded.webContentLink || null,
+      driveUrl,
       sourceUrl: resolvedSourceUrl,
     };
   } catch (error) {
@@ -1138,7 +1140,7 @@ export async function recordBrowserDriveUpload(supabase, {
     stored: true,
     provider: "google_drive",
     fileId,
-    pdfUrl: webViewLink || null,
+    driveUrl: webViewLink || null,
     sourceUrl: sourceUrl || null,
   };
 }

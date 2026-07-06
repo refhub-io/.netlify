@@ -124,6 +124,29 @@ describe("PATCH /vaults/:vaultId/items/:itemId — bibliographic rollup", () => 
     expect(rpc).not.toHaveBeenCalled();
   });
 
+  it("calls the RPC for a notes-only PATCH (notes is vault-local but still updates the target row)", async () => {
+    const { supabase, rpc } = makeSupabaseWithRpc({
+      refreshedItem: { ...EXISTING_ITEM, notes: "updated notes", version: 2 },
+    });
+    vi.mocked(authenticateApiKey).mockResolvedValue({
+      supabase,
+      principal: makeApiKeyPrincipal({ scopes: ["vaults:write"], userId: "user-test" }),
+    });
+
+    const res = await handler(makePatchEvent({ notes: "updated notes" }));
+
+    // notes IS one of PUBLICATION_FIELDS, so pickPublicationFieldsForUpdate includes it and
+    // the RPC is called — the SQL function applies it to the target row only and skips the
+    // canonical/sibling rollup itself (no other bibliographic field is present in the patch).
+    expect(res.statusCode).toBe(200);
+    expect(rpc).toHaveBeenCalledWith("update_vault_publication_with_rollup", {
+      p_vault_publication_id: "item-1",
+      p_vault_id: "vault-1",
+      p_patch: { notes: "updated notes" },
+      p_actor_user_id: "user-test",
+    });
+  });
+
   it("returns a structured 502 and does not report success when the rollup RPC fails", async () => {
     const { supabase, rpc } = makeSupabaseWithRpc({
       rpcError: { message: "vault publication item-1 not found in vault vault-1", code: "P0002" },

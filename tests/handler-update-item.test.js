@@ -40,7 +40,27 @@ function makePatchEvent(body) {
   };
 }
 
-describe("PATCH /vaults/:vaultId/items/:itemId — partial update safety", () => {
+/** Builds the mock supabase client + a spy for the rollup RPC. */
+function makeSupabaseWithRpc({ existingItem = EXISTING_ITEM, refreshedItem, rpcError = null } = {}) {
+  const supabase = makeCapturingSupabaseMulti(
+    {
+      vaults: [{ data: VAULT, error: null }],
+      vault_shares: [{ data: null, error: null }],
+      vault_publications: [
+        { data: existingItem, error: null }, // existingResult read
+        { data: refreshedItem ?? existingItem, error: null }, // refreshed read
+      ],
+    },
+    ["vault_publications"],
+  ).supabase;
+
+  const rpc = vi.fn().mockResolvedValue({ data: null, error: rpcError });
+  supabase.rpc = rpc;
+
+  return { supabase, rpc };
+}
+
+describe("PATCH /vaults/:vaultId/items/:itemId — bibliographic rollup", () => {
   beforeEach(() => {
     process.env.SUPABASE_URL = "http://localhost";
     process.env.SUPABASE_SERVICE_ROLE_KEY = "test";
@@ -51,68 +71,73 @@ describe("PATCH /vaults/:vaultId/items/:itemId — partial update safety", () =>
     vi.mocked(authenticateApiKey).mockReset();
   });
 
-  it("does not clear authors or reset publication_type when only pdf_url is sent", async () => {
-    const refreshedItem = { ...EXISTING_ITEM, pdf_url: "https://drive.example/view", version: 2 };
-
-    const { supabase, captured } = makeCapturingSupabaseMulti(
-      {
-        vaults: [{ data: VAULT, error: null }],
-        vault_publications: [
-          { data: EXISTING_ITEM, error: null }, // existingResult read
-          { data: null, error: null }, // update() call result
-          { data: refreshedItem, error: null }, // refreshed read
-        ],
-      },
-      ["vault_publications"],
-    );
-
+  it("calls the rollup RPC with only the fields the caller sent, no defaults", async () => {
+    const { supabase, rpc } = makeSupabaseWithRpc({
+      refreshedItem: { ...EXISTING_ITEM, pdf_url: "https://drive.example/view", version: 2 },
+    });
     vi.mocked(authenticateApiKey).mockResolvedValue({
       supabase,
-      principal: makeApiKeyPrincipal({ scopes: ["vaults:write"] }),
+      principal: makeApiKeyPrincipal({ scopes: ["vaults:write"], userId: "user-test" }),
     });
 
     const res = await handler(makePatchEvent({ pdf_url: "https://drive.example/view" }));
 
     expect(res.statusCode).toBe(200);
-
-    const updateArg = captured.vault_publications.updates[0];
-    expect(updateArg).toBeDefined();
-    expect(updateArg.pdf_url).toBe("https://drive.example/view");
-    // Buggy code force-defaults these on any PATCH; fixed code omits untouched fields entirely.
-    expect(updateArg).not.toHaveProperty("authors");
-    expect(updateArg).not.toHaveProperty("publication_type");
-    expect(updateArg).not.toHaveProperty("editor");
-    expect(updateArg).not.toHaveProperty("keywords");
-
+    expect(rpc).toHaveBeenCalledWith("update_vault_publication_with_rollup", {
+      p_vault_publication_id: "item-1",
+      p_vault_id: "vault-1",
+      p_patch: { pdf_url: "https://drive.example/view" },
+      p_actor_user_id: "user-test",
+    });
     const body = parseBody(res);
     expect(body.data.pdf_url).toBe("https://drive.example/view");
   });
 
-  it("still applies fields the caller explicitly sends", async () => {
-    const refreshedItem = { ...EXISTING_ITEM, title: "New Title", version: 2 };
-
-    const { supabase, captured } = makeCapturingSupabaseMulti(
-      {
-        vaults: [{ data: VAULT, error: null }],
-        vault_publications: [
-          { data: EXISTING_ITEM, error: null },
-          { data: null, error: null },
-          { data: refreshedItem, error: null },
-        ],
-      },
-      ["vault_publications"],
-    );
-
+  it("still applies fields the caller explicitly sends, via the RPC patch", async () => {
+    const { supabase, rpc } = makeSupabaseWithRpc({
+      refreshedItem: { ...EXISTING_ITEM, title: "New Title", version: 2 },
+    });
     vi.mocked(authenticateApiKey).mockResolvedValue({
       supabase,
-      principal: makeApiKeyPrincipal({ scopes: ["vaults:write"] }),
+      principal: makeApiKeyPrincipal({ scopes: ["vaults:write"], userId: "user-test" }),
     });
 
     const res = await handler(makePatchEvent({ title: "New Title" }));
 
     expect(res.statusCode).toBe(200);
-    const updateArg = captured.vault_publications.updates[0];
-    expect(updateArg.title).toBe("New Title");
-    expect(updateArg).not.toHaveProperty("authors");
+    expect(rpc).toHaveBeenCalledWith(
+      "update_vault_publication_with_rollup",
+      expect.objectContaining({ p_patch: { title: "New Title" } }),
+    );
+  });
+
+  it("does not call the RPC when the PATCH only touches tag_ids", async () => {
+    const { supabase, rpc } = makeSupabaseWithRpc();
+    vi.mocked(authenticateApiKey).mockResolvedValue({
+      supabase,
+      principal: makeApiKeyPrincipal({ scopes: ["vaults:write"], userId: "user-test" }),
+    });
+
+    const res = await handler(makePatchEvent({ tag_ids: [] }));
+
+    expect(res.statusCode).toBe(200);
+    expect(rpc).not.toHaveBeenCalled();
+  });
+
+  it("returns a structured 502 and does not report success when the rollup RPC fails", async () => {
+    const { supabase, rpc } = makeSupabaseWithRpc({
+      rpcError: { message: "vault publication item-1 not found in vault vault-1", code: "P0002" },
+    });
+    vi.mocked(authenticateApiKey).mockResolvedValue({
+      supabase,
+      principal: makeApiKeyPrincipal({ scopes: ["vaults:write"], userId: "user-test" }),
+    });
+
+    const res = await handler(makePatchEvent({ doi: "10.1/new" }));
+
+    expect(res.statusCode).toBe(502);
+    const body = parseBody(res);
+    expect(body.error.code).toBe("publication_rollup_failed");
+    expect(rpc).toHaveBeenCalledTimes(1);
   });
 });

@@ -1860,17 +1860,21 @@ async function handleUpdateItem(supabase, principal, context, vaultId, itemId, e
   }
 
   if (Object.keys(updateRow).length > 0) {
-    updateRow.version = (existingResult.data.version || 1) + 1;
-    updateRow.updated_at = new Date().toISOString();
+    const rollupResult = await supabase.rpc("update_vault_publication_with_rollup", {
+      p_vault_publication_id: itemId,
+      p_vault_id: vaultId,
+      p_patch: updateRow,
+      p_actor_user_id: principal.userId,
+    });
 
-    const updateResult = await supabase
-      .from("vault_publications")
-      .update(updateRow)
-      .eq("id", itemId)
-      .eq("vault_id", vaultId);
-
-    if (updateResult.error) {
-      throw updateResult.error;
+    if (rollupResult.error) {
+      return errorResponse(
+        502,
+        "publication_rollup_failed",
+        "Failed to apply the update across the canonical publication and its vault copies",
+        context.requestId,
+        { postgres_message: rollupResult.error.message },
+      );
     }
   }
 

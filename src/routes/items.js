@@ -11,7 +11,13 @@
 import { API_SCOPES, requireScope, resolveVaultAccess } from "../auth.js";
 import { json, errorResponse, parseJsonBody } from "../http.js";
 import { getConfig } from "../config.js";
-import { VAULT_PUBLICATION_SELECT, pickPublicationFields, touchVaultUpdatedAt, attachDrivePdfUrls } from "./utils.js";
+import {
+  VAULT_PUBLICATION_SELECT,
+  pickPublicationFields,
+  pickPublicationFieldsForUpdate,
+  touchVaultUpdatedAt,
+  attachDrivePdfUrls,
+} from "./utils.js";
 
 // In-memory idempotency cache for bulk upsert (TTL: 5 min)
 const upsertIdempotencyCache = new Map();
@@ -163,7 +169,7 @@ export async function handleBulkUpsertItems(supabase, principal, context, vaultI
     try {
       if (existing) {
         const updateRow = {
-          ...pickPublicationFields(item),
+          ...pickPublicationFieldsForUpdate(item),
           version: (existing.version || 1) + 1,
           updated_at: new Date().toISOString(),
         };

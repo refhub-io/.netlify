@@ -3,6 +3,7 @@ import { handleGetItem, handleDeleteItem, handleBulkUpsertItems, handleImportPre
 import {
   makeMockSupabase,
   makeMockSupabaseMulti,
+  makeCapturingSupabaseMulti,
   makeApiKeyPrincipal,
   makeContext,
   makeEvent,
@@ -229,6 +230,37 @@ describe("handleBulkUpsertItems", () => {
     const second = await handleBulkUpsertItems(brokenSupabase, principal, CTX, vault.id, eventFn());
     expect(second.statusCode).toBe(200);
     expect(parseBody(second)).toEqual(parseBody(first));
+  });
+
+  it("does not clear authors or reset publication_type on a matched partial update", async () => {
+    const vault = makeMockVault();
+    const existing = { id: "vp1", doi: "10.1/updated", version: 1 };
+    const { supabase, captured } = makeCapturingSupabaseMulti(
+      {
+        vaults: [{ data: vault, error: null }],
+        vault_shares: [{ data: null, error: null }],
+        vault_publications: [
+          { data: [existing], error: null }, // DOI dedup lookup — matches
+          { data: { id: "vp1", doi: "10.1/updated", version: 2 }, error: null }, // update().select().single()
+        ],
+      },
+      ["vault_publications"],
+    );
+    const principal = makeApiKeyPrincipal();
+    // title is required on every item; authors/publication_type are deliberately omitted.
+    const event = makeEvent({ body: JSON.stringify({ items: [{ title: "Updated Paper", doi: "10.1/updated" }] }) });
+
+    const res = await handleBulkUpsertItems(supabase, principal, CTX, vault.id, event);
+
+    expect(res.statusCode).toBe(200);
+    const updateArg = captured.vault_publications.updates[0];
+    expect(updateArg).toBeDefined();
+    expect(updateArg.doi).toBe("10.1/updated");
+    // Buggy code force-defaults these on any update; fixed code omits untouched fields entirely.
+    expect(updateArg).not.toHaveProperty("authors");
+    expect(updateArg).not.toHaveProperty("publication_type");
+    expect(updateArg).not.toHaveProperty("editor");
+    expect(updateArg).not.toHaveProperty("keywords");
   });
 });
 

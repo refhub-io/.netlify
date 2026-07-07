@@ -165,7 +165,7 @@ SEMANTIC_SCHOLAR_RATE_LIMIT_WINDOW_MS    ← rate-limit window, defaults to 6000
 SEMANTIC_SCHOLAR_TIMEOUT_MS              ← upstream timeout, defaults to 8000
 REFHUB_API_MAX_BULK_ITEMS      ← defaults to 50
 REFHUB_API_MAX_BODY_BYTES      ← defaults to 52428800
-REFHUB_API_ALLOWED_ORIGINS     ← comma-separated browser origins; defaults to https://refhub.io plus localhost dev ports 3000, 5173, and 8081
+REFHUB_API_ALLOWED_ORIGINS     ← comma-separated browser origins; defaults to https://refhub.io plus localhost dev ports 3000, 5173, 8080, and 8081
 REFHUB_API_AUDIT_DISABLED      ← defaults to false
 ```
 
@@ -393,7 +393,7 @@ auth: supabase session jwt only unless noted.
 
 `POST /api/v1/vaults/:vaultId/items/:itemId/pdf` uploads or fetches a PDF for a vault item and stores it in linked Google Drive. Body must be JSON with `source_url` plus optional `cookie_header`/`referer` — the backend fetches the PDF server-side (e.g. using institutional-access cookies), so this is not subject to any client-payload size limit. **Raw `application/pdf` request bodies are no longer accepted on this route** — any client that already holds the PDF bytes locally must use the resumable session flow below instead, regardless of file size. A raw PDF/octet-stream body sent here returns `410 raw_pdf_upload_removed`.
 
-`POST /api/v1/vaults/:vaultId/items/:itemId/pdf/session` creates a Google Drive resumable upload session — the **only** way to upload PDF bytes a client already holds locally, for any file size. The client PUTs the PDF bytes directly to the returned `upload_url`, then calls `/pdf/complete`. When used from browsers, the API forwards the validated request `Origin` to Google when creating the session so browser-direct PUTs receive matching Drive CORS headers. If `REFHUB_API_ALLOWED_ORIGINS` is set explicitly, include every dev origin you use, e.g. `http://localhost:8081`; arbitrary origins are not reflected.
+`POST /api/v1/vaults/:vaultId/items/:itemId/pdf/session` creates a Google Drive resumable upload session — the **only** way to upload PDF bytes a client already holds locally, for any file size. The client PUTs the PDF bytes directly to the returned `upload_url`, then calls `/pdf/complete`. When used from browsers, the API forwards the validated request `Origin` to Google when creating the session so browser-direct PUTs receive matching Drive CORS headers. If `REFHUB_API_ALLOWED_ORIGINS` is set explicitly (including on any deployed Netlify site, which does not inherit the code defaults from a local `.env`), include every dev/frontend origin you use, e.g. `http://localhost:8080` (this repo's actual frontend dev port) or `http://localhost:8081`; arbitrary origins are not reflected.
 
 `POST /api/v1/vaults/:vaultId/items/:itemId/pdf/complete` records a client-completed Drive upload. Body must include `file_id`; `web_view_link` and `source_url` are optional.
 

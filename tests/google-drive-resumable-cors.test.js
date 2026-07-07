@@ -86,6 +86,31 @@ describe("Google Drive resumable session CORS origin", () => {
     expect(uploadCall?.[1]?.headers?.Origin).toBe("http://localhost:8081");
   });
 
+  it("forwards the refhub.io frontend's actual Vite dev port (8080) by default", async () => {
+    const fetchMock = vi.fn(async (url) => {
+      if (String(url).includes("oauth2.googleapis.com/token")) {
+        return makeJsonResponse({ access_token: "access-token" });
+      }
+      if (String(url).includes("/drive/v3/files/folder-1")) {
+        return makeJsonResponse({ id: "folder-1", name: "refhub", mimeType: "application/vnd.google-apps.folder", trashed: false });
+      }
+      if (String(url).includes("/upload/drive/v3/files")) {
+        return makeJsonResponse({}, { headers: { location: "https://www.googleapis.com/upload/session" } });
+      }
+      throw new Error(`Unexpected fetch ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await createDriveResumableSession(makeSupabase(), "user-test", {
+      title: "Large Paper",
+      year: 2026,
+      origin: "http://localhost:8080",
+    });
+
+    const uploadCall = fetchMock.mock.calls.find(([url]) => String(url).includes("/upload/drive/v3/files"));
+    expect(uploadCall?.[1]?.headers?.Origin).toBe("http://localhost:8080");
+  });
+
   it("does not forward a disallowed browser Origin to Google", async () => {
     const fetchMock = vi.fn(async (url, init = {}) => {
       if (String(url).includes("oauth2.googleapis.com/token")) {

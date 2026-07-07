@@ -93,6 +93,27 @@ describe("handleGetItem", () => {
     expect(res.statusCode).toBe(404);
     expect(parseBody(res).error.code).toBe("item_not_found");
   });
+
+  it("adds drive_pdf_url from publication_pdf_assets without touching pdf_url", async () => {
+    const vault = makeMockVault();
+    const item = { id: "pub1", vault_id: vault.id, title: "One Paper", pdf_url: "https://journal.example/paper.pdf" };
+    const supabase = makeMockSupabaseMulti({
+      vaults: [{ data: vault, error: null }],
+      vault_shares: [{ data: null, error: null }],
+      vault_publications: [{ data: item, error: null }],
+      publication_pdf_assets: [
+        { data: [{ vault_publication_id: "pub1", stored_pdf_url: "https://drive.example/view" }], error: null },
+      ],
+    });
+    const principal = makeApiKeyPrincipal();
+
+    const res = await handleGetItem(supabase, principal, CTX, vault.id, item.id);
+
+    expect(res.statusCode).toBe(200);
+    const body = parseBody(res);
+    expect(body.data.drive_pdf_url).toBe("https://drive.example/view");
+    expect(body.data.pdf_url).toBe("https://journal.example/paper.pdf");
+  });
 });
 
 describe("handleBulkUpsertItems", () => {

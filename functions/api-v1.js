@@ -84,6 +84,7 @@ import {
   handleBulkUpsertItems,
   handleImportPreview,
 } from "../src/routes/items.js";
+import { attachDrivePdfUrls } from "../src/routes/utils.js";
 import {
   handleImportDoi,
   handleImportBibtex,
@@ -1085,6 +1086,25 @@ function pickPublicationFields(input) {
   return row;
 }
 
+/**
+ * Same field allow-list as pickPublicationFields, but for partial updates:
+ * only fields actually present in the input are included, with no defaults
+ * applied. pickPublicationFields' defaults (empty arrays, 'article' type)
+ * are correct for creating a new row but wipe existing values when reused
+ * for PATCH, since any field the caller omits should stay untouched.
+ */
+function pickPublicationFieldsForUpdate(input) {
+  const row = {};
+
+  for (const field of PUBLICATION_FIELDS) {
+    if (input[field] !== undefined) {
+      row[field] = input[field];
+    }
+  }
+
+  return row;
+}
+
 async function writeAuditLog(supabase, context, principal, response, metadata = {}) {
   const { auditDisabled } = getConfig();
   if (auditDisabled || !supabase || !principal || principal.authType !== "api_key") {
@@ -1111,8 +1131,8 @@ async function writeAuditLog(supabase, context, principal, response, metadata = 
   }
 }
 
-async function loadVaultContents(supabase, vaultId) {
-  const { data: publications, error: publicationsError } = await supabase
+async function loadVaultContents(supabase, vaultId, userId) {
+  const { data: rawPublications, error: publicationsError } = await supabase
     .from("vault_publications")
     .select(VAULT_PUBLICATION_SELECT)
     .eq("vault_id", vaultId)
@@ -1121,6 +1141,8 @@ async function loadVaultContents(supabase, vaultId) {
   if (publicationsError) {
     throw publicationsError;
   }
+
+  const publications = await attachDrivePdfUrls(supabase, rawPublications, userId);
 
   const publicationIds = publications.map((publication) => publication.id);
   const { data: tags, error: tagsError } = await supabase
@@ -1267,7 +1289,7 @@ async function handleReadVault(supabase, principal, context, vaultId) {
     return errorResponse(access.status, access.code, message, context.requestId);
   }
 
-  const contents = await loadVaultContents(supabase, vaultId);
+  const contents = await loadVaultContents(supabase, vaultId, principal.userId);
 
   return json(200, {
     data: {
@@ -1824,7 +1846,7 @@ async function handleUpdateItem(supabase, principal, context, vaultId, itemId, e
   }
 
   const body = parsedBody.value || {};
-  const updateRow = pickPublicationFields(body);
+  const updateRow = pickPublicationFieldsForUpdate(body);
 
   const existingResult = await supabase
     .from("vault_publications")
@@ -1889,8 +1911,10 @@ async function handleUpdateItem(supabase, principal, context, vaultId, itemId, e
     throw refreshed.error;
   }
 
+  const [enrichedItem] = await attachDrivePdfUrls(supabase, [refreshed.data], principal.userId);
+
   return json(200, {
-    data: refreshed.data,
+    data: enrichedItem,
     meta: {
       request_id: context.requestId,
       vault_id: vaultId,
@@ -1913,7 +1937,7 @@ async function handleExportVault(supabase, principal, context, vaultId, event) {
     return errorResponse(400, "unsupported_format", "Supported export formats: json, bibtex", context.requestId);
   }
 
-  const contents = await loadVaultContents(supabase, vaultId);
+  const contents = await loadVaultContents(supabase, vaultId, principal.userId);
   const payload = {
     vault: access.vault,
     exported_at: new Date().toISOString(),

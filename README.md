@@ -399,6 +399,8 @@ auth: supabase session jwt only unless noted.
 
 All upload routes on this page return the stored Drive link as `driveUrl` in their response `data` (previously `pdfUrl`) — renamed to stop colliding in name with the unrelated `pdf_url` publication field (the publisher-hosted link). Matches the corresponding rename in the RefHub frontend, CLI, and skill clients.
 
+Uploads via either PDF route only ever write to `publication_pdf_assets` — never to the item's own `pdf_url` column. `pdf_url` is bibliographic metadata (the publisher-hosted link, matching the RefHub frontend's `publisher_pdf` field) and is shared across every vault the underlying publication appears in; a Drive file is a storage asset scoped to the uploading user's own Drive account. Folding the two together would silently overwrite `pdf_url` and leak one user's private Drive link into a field every vault collaborator sees. Instead, item read responses (`GET /vaults/:vaultId`, `GET /vaults/:vaultId/items/:itemId`, and the refreshed row returned by `PATCH .../items/:itemId`) include a separate `drive_pdf_url` field — the same `stored_pdf_url` the frontend reads directly from `publication_pdf_assets` (vault-specific copy first, falling back to a same-publication asset from another vault), surfaced here for API-key clients that don't have direct Supabase access.
+
 ### Publication-level PDF upload
 
 auth: supabase session jwt only. Uploads a PDF for a publication the authenticated user owns directly (not scoped to a specific vault item) and stores it in their linked Google Drive. Records the asset in `publication_pdf_assets`. Mirrors the vault-item resumable flow exactly — there is no raw-bytes variant of this route.
@@ -453,7 +455,7 @@ scope: `vaults:read`. returns vaults accessible through ownership or explicit sh
 
 ### `GET /api/v1/vaults/:vaultId`
 
-scope: `vaults:read`. returns vault metadata + `vault_publications` + vault-scoped `tags` + `publication_tags` + `publication_relations`.
+scope: `vaults:read`. returns vault metadata + `vault_publications` + vault-scoped `tags` + `publication_tags` + `publication_relations`. Each publication in `vault_publications` also carries a `drive_pdf_url` field — see the note on the PDF upload routes above.
 
 ### V2 vault and organization routes
 

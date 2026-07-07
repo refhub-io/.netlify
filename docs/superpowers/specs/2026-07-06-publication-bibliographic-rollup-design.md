@@ -47,14 +47,14 @@ update_vault_publication_with_rollup(
   p_vault_id uuid,
   p_patch jsonb,
   p_actor_user_id uuid
-) RETURNS vault_publications
+) RETURNS void
 ```
 
 One transaction, three steps:
 
 1. **Target row.** `UPDATE vault_publications SET <only the fields present in p_patch>, version = version + 1, updated_at = now() WHERE id = p_vault_publication_id AND vault_id = p_vault_id`. The `vault_id` check is a defense-in-depth data-layer guard — Node has already verified the caller's access and that the item belongs to this vault before calling the function, but the function doesn't assume that. If no row matches, raise `item_not_found`.
 2. **Canonical row.** If `p_patch` touches at least one bibliographic field: `UPDATE publications SET <same fields>, updated_at = now() WHERE id = (the target row's original_publication_id)`. No `version` bump — `publications` has no `version` column, and this matches the frontend's existing behavior of only bumping `version` on the directly-edited copy.
-3. **Sibling rows.** `UPDATE vault_publications SET <same fields>, updated_at = now(), updated_by = p_actor_user_id WHERE original_publication_id = <canonical id> AND id <> p_vault_publication_id`. Same no-version-bump rule.
+3. **Sibling rows.** `UPDATE vault_publications SET <same fields>, updated_at = now() WHERE original_publication_id = <canonical id> AND id <> p_vault_publication_id`. Same no-version-bump rule. `vault_publications` has a `BEFORE UPDATE` trigger that sets `updated_by := auth.uid()` on every update; since the function runs under the service-role key with no JWT context, `auth.uid()` is `NULL` unless the function first does `PERFORM set_config('request.jwt.claim.sub', p_actor_user_id::text, true)` so the trigger picks up the real actor instead of overwriting it with `NULL`.
 
 Every `vault_publications` row created through the API always has a non-null `original_publication_id` (confirmed: both `handleAddItems` and `handleBulkUpsertItems`'s create path set it to the just-inserted canonical row's id) — there is no "copy with no canonical parent" case to special-case.
 
@@ -64,9 +64,9 @@ Any failure at any step raises, and Postgres rolls back the entire transaction �
 
 ### API integration (`handleUpdateItem`, `functions/api-v1.js`)
 
-Current flow: build `updateRow` via `pickPublicationFieldsForUpdate(body)` → if non-empty, bump version/`updated_at` and `.update(updateRow).eq('id', itemId).eq('vault_id', vaultId)` directly against `vault_publications` → handle `tag_ids` separately (unchanged) → re-select and enrich with `drive_pdf_url` (unchanged).
+Current flow: build `updateRow` via `pickPublicationFieldsForUpdate(body)` → if non-empty, bump version/`updated_at` and `.update(updateRow).eq('id', itemId).eq('vault_id', vaultId)` directly against `vault_publications` → handle `tag_ids` separately (unchanged) → re-select and return.
 
-New flow: replace the direct `.update(updateRow)` call with `supabase.rpc('update_vault_publication_with_rollup', { p_vault_publication_id: itemId, p_vault_id: vaultId, p_patch: updateRow, p_actor_user_id: principal.userId })` when `updateRow` is non-empty. Everything else (existence pre-check for a clean 404, `tag_ids` handling, the refreshed re-select + `drive_pdf_url` enrichment) stays as-is.
+New flow: replace the direct `.update(updateRow)` call with `supabase.rpc('update_vault_publication_with_rollup', { p_vault_publication_id: itemId, p_vault_id: vaultId, p_patch: updateRow, p_actor_user_id: principal.userId })` when `updateRow` is non-empty. Everything else (existence pre-check for a clean 404, `tag_ids` handling, the refreshed re-select) stays as-is.
 
 ### Error handling
 

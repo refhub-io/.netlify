@@ -1868,6 +1868,15 @@ async function handleUpdateItem(supabase, principal, context, vaultId, itemId, e
     });
 
     if (rollupResult.error) {
+      // P0002 is the SQL function's own not-found raise (its WHERE id/vault_id
+      // matched nothing) — this can happen via a race even though we just
+      // checked existence above (item deleted in between). Map it to the same
+      // 404 the pre-check above would have returned, rather than the generic
+      // 502 reserved for genuine rollup/infrastructure failures.
+      if (rollupResult.error.code === "P0002") {
+        return errorResponse(404, "item_not_found", "Vault item not found", context.requestId);
+      }
+
       return errorResponse(
         502,
         "publication_rollup_failed",

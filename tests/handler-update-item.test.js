@@ -149,7 +149,7 @@ describe("PATCH /vaults/:vaultId/items/:itemId — bibliographic rollup", () => 
 
   it("returns a structured 502 and does not report success when the rollup RPC fails", async () => {
     const { supabase, rpc } = makeSupabaseWithRpc({
-      rpcError: { message: "vault publication item-1 not found in vault vault-1", code: "P0002" },
+      rpcError: { message: "constraint violation applying patch", code: "23514" },
     });
     vi.mocked(authenticateApiKey).mockResolvedValue({
       supabase,
@@ -161,6 +161,23 @@ describe("PATCH /vaults/:vaultId/items/:itemId — bibliographic rollup", () => 
     expect(res.statusCode).toBe(502);
     const body = parseBody(res);
     expect(body.error.code).toBe("publication_rollup_failed");
+    expect(rpc).toHaveBeenCalledTimes(1);
+  });
+
+  it("maps the RPC's own not-found race (P0002) to 404 item_not_found, not a generic 502", async () => {
+    const { supabase, rpc } = makeSupabaseWithRpc({
+      rpcError: { message: "vault publication item-1 not found in vault vault-1", code: "P0002" },
+    });
+    vi.mocked(authenticateApiKey).mockResolvedValue({
+      supabase,
+      principal: makeApiKeyPrincipal({ scopes: ["vaults:write"], userId: "user-test" }),
+    });
+
+    const res = await handler(makePatchEvent({ doi: "10.1/new" }));
+
+    expect(res.statusCode).toBe(404);
+    const body = parseBody(res);
+    expect(body.error.code).toBe("item_not_found");
     expect(rpc).toHaveBeenCalledTimes(1);
   });
 });

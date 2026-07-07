@@ -39,7 +39,7 @@ export async function handleGetItem(supabase, principal, context, vaultId, itemI
   if (error) throw error;
   if (!item) return errorResponse(404, "item_not_found", "Item not found", context.requestId);
 
-  const [enrichedItem] = await attachDrivePdfUrls(supabase, [item]);
+  const [enrichedItem] = await attachDrivePdfUrls(supabase, [item], principal.userId);
 
   return json(200, {
     data: enrichedItem,

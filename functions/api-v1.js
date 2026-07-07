@@ -1131,7 +1131,7 @@ async function writeAuditLog(supabase, context, principal, response, metadata = 
   }
 }
 
-async function loadVaultContents(supabase, vaultId) {
+async function loadVaultContents(supabase, vaultId, userId) {
   const { data: rawPublications, error: publicationsError } = await supabase
     .from("vault_publications")
     .select(VAULT_PUBLICATION_SELECT)
@@ -1142,7 +1142,7 @@ async function loadVaultContents(supabase, vaultId) {
     throw publicationsError;
   }
 
-  const publications = await attachDrivePdfUrls(supabase, rawPublications);
+  const publications = await attachDrivePdfUrls(supabase, rawPublications, userId);
 
   const publicationIds = publications.map((publication) => publication.id);
   const { data: tags, error: tagsError } = await supabase
@@ -1289,7 +1289,7 @@ async function handleReadVault(supabase, principal, context, vaultId) {
     return errorResponse(access.status, access.code, message, context.requestId);
   }
 
-  const contents = await loadVaultContents(supabase, vaultId);
+  const contents = await loadVaultContents(supabase, vaultId, principal.userId);
 
   return json(200, {
     data: {
@@ -1911,7 +1911,7 @@ async function handleUpdateItem(supabase, principal, context, vaultId, itemId, e
     throw refreshed.error;
   }
 
-  const [enrichedItem] = await attachDrivePdfUrls(supabase, [refreshed.data]);
+  const [enrichedItem] = await attachDrivePdfUrls(supabase, [refreshed.data], principal.userId);
 
   return json(200, {
     data: enrichedItem,
@@ -1937,7 +1937,7 @@ async function handleExportVault(supabase, principal, context, vaultId, event) {
     return errorResponse(400, "unsupported_format", "Supported export formats: json, bibtex", context.requestId);
   }
 
-  const contents = await loadVaultContents(supabase, vaultId);
+  const contents = await loadVaultContents(supabase, vaultId, principal.userId);
   const payload = {
     vault: access.vault,
     exported_at: new Date().toISOString(),

@@ -106,11 +106,18 @@ export async function validateVaultTagIds(supabase, vaultId, tagIds) {
  * bibliographic metadata). A Drive file is a storage asset, not metadata,
  * and publication_pdf_assets is keyed per uploading user, so folding it
  * into the shared pdf_url column would leak one user's private Drive link
- * into a field every vault collaborator sees. This mirrors the same
- * vault-then-canonical-publication lookup and field name the RefHub
- * frontend uses when it queries publication_pdf_assets directly.
+ * into a field every vault collaborator sees.
+ *
+ * Scoped to userId: publication_pdf_assets' own RLS policy restricts SELECT
+ * to `user_id = auth.uid()`, and the frontend's equivalent query relies
+ * entirely on that RLS to limit results to the caller's own uploads (it has
+ * no explicit user_id filter in the JS). This backend runs under the
+ * service-role key, which bypasses RLS — without an explicit userId filter
+ * here, any vault collaborator with read access would see every uploader's
+ * Drive link, not just their own. This must stay an explicit filter, not a
+ * default, since there is no RLS backstop on this code path.
  */
-export async function attachDrivePdfUrls(supabase, items) {
+export async function attachDrivePdfUrls(supabase, items, userId) {
   if (!items || items.length === 0) return items ?? [];
 
   const vaultPublicationIds = items.map((item) => item.id).filter(Boolean);
@@ -124,6 +131,7 @@ export async function attachDrivePdfUrls(supabase, items) {
           .from("publication_pdf_assets")
           .select("vault_publication_id, stored_pdf_url")
           .in("vault_publication_id", vaultPublicationIds)
+          .eq("user_id", userId)
           .eq("storage_provider", "google_drive")
           .eq("status", "stored")
       : Promise.resolve({ data: [], error: null }),
@@ -133,6 +141,7 @@ export async function attachDrivePdfUrls(supabase, items) {
           .select("publication_id, stored_pdf_url")
           .in("publication_id", originalPublicationIds)
           .is("vault_publication_id", null)
+          .eq("user_id", userId)
           .eq("storage_provider", "google_drive")
           .eq("status", "stored")
       : Promise.resolve({ data: [], error: null }),

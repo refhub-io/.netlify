@@ -49,7 +49,7 @@ describe("validateVaultTagIds", () => {
 describe("attachDrivePdfUrls", () => {
   it("returns items unchanged (empty array) when given none", async () => {
     const supabase = makeMockSupabase({});
-    expect(await attachDrivePdfUrls(supabase, [])).toEqual([]);
+    expect(await attachDrivePdfUrls(supabase, [], "user-1")).toEqual([]);
   });
 
   it("prefers the vault-specific asset over the canonical-publication fallback", async () => {
@@ -62,7 +62,7 @@ describe("attachDrivePdfUrls", () => {
 
     const [result] = await attachDrivePdfUrls(supabase, [
       { id: "item1", original_publication_id: "pub1", pdf_url: "https://journal.example/paper.pdf" },
-    ]);
+    ], "user-1");
 
     expect(result.drive_pdf_url).toBe("https://drive.example/vault-copy");
     expect(result.pdf_url).toBe("https://journal.example/paper.pdf");
@@ -76,7 +76,7 @@ describe("attachDrivePdfUrls", () => {
       ],
     });
 
-    const [result] = await attachDrivePdfUrls(supabase, [{ id: "item1", original_publication_id: "pub1" }]);
+    const [result] = await attachDrivePdfUrls(supabase, [{ id: "item1", original_publication_id: "pub1" }], "user-1");
 
     expect(result.drive_pdf_url).toBe("https://drive.example/canonical-copy");
   });
@@ -86,7 +86,47 @@ describe("attachDrivePdfUrls", () => {
       publication_pdf_assets: [{ data: [], error: null }],
     });
 
-    const [result] = await attachDrivePdfUrls(supabase, [{ id: "item1", original_publication_id: null }]);
+    const [result] = await attachDrivePdfUrls(supabase, [{ id: "item1", original_publication_id: null }], "user-1");
+
+    expect(result.drive_pdf_url).toBeNull();
+  });
+
+  it("scopes both asset lookups to the given userId, not just any uploader", async () => {
+    const eqCalls = [];
+    function makeTrackingChain(result) {
+      return new Proxy({}, {
+        get(_, prop) {
+          if (prop === "then") return (fn) => Promise.resolve(result).then(fn);
+          return (...args) => {
+            if (prop === "eq") eqCalls.push(args);
+            return makeTrackingChain(result);
+          };
+        },
+      });
+    }
+    const supabase = { from: () => makeTrackingChain({ data: [], error: null }) };
+
+    await attachDrivePdfUrls(supabase, [{ id: "item1", original_publication_id: "pub1" }], "user-42");
+
+    const userIdFilters = eqCalls.filter(([column]) => column === "user_id");
+    // One .eq("user_id", ...) per lookup (vault-scoped + canonical), both scoped to the caller.
+    expect(userIdFilters.length).toBe(2);
+    expect(userIdFilters.every(([, value]) => value === "user-42")).toBe(true);
+  });
+
+  it("does not leak a different user's uploaded asset into drive_pdf_url", async () => {
+    // Mock mirrors real Supabase behavior: a userId-scoped query for a different
+    // user's asset returns no rows, even though a row exists for that item.
+    const supabase = makeMockSupabaseMulti({
+      publication_pdf_assets: [
+        { data: [], error: null }, // vault-scoped lookup for "other-user": nothing visible
+        { data: [], error: null }, // canonical lookup for "other-user": nothing visible
+      ],
+    });
+
+    const [result] = await attachDrivePdfUrls(supabase, [
+      { id: "item1", original_publication_id: "pub1" },
+    ], "other-user");
 
     expect(result.drive_pdf_url).toBeNull();
   });

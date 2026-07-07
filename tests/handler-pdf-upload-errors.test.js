@@ -67,6 +67,15 @@ describe("PDF upload handler errors", () => {
     expect(authenticateApiKey).not.toHaveBeenCalled();
   });
 
+  it("rejects a raw PDF body larger than the generic request-size limit with 410, not 413", async () => {
+    process.env.REFHUB_API_MAX_BODY_BYTES = "1000";
+
+    const res = await handler(makePdfEvent({ body: "%PDF-".padEnd(2000, "x") }));
+
+    expect(res.statusCode).toBe(410);
+    expect(JSON.parse(res.body).error.code).toBe("raw_pdf_upload_removed");
+  });
+
   it("still accepts a JSON source_url body on the vault-item /pdf route", async () => {
     vi.mocked(authenticateApiKey).mockResolvedValue({
       supabase: makeMockSupabaseMulti({

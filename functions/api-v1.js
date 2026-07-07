@@ -1945,20 +1945,20 @@ export async function handler(event) {
       }, corsHeaders);
     }
 
-    const { maxBodyBytes } = getConfig();
-    if (getRequestBodySize(event) > maxBodyBytes) {
-      return withCors(
-        errorResponse(413, "request_too_large", `Request body exceeds ${maxBodyBytes} bytes`, context.requestId),
-        corsHeaders,
-      );
-    }
-
     const route = getRouteSegments(event.path || "/");
     if (isVaultItemPdfUploadRoute(route, event.httpMethod)) {
       const rawBodyRejection = rejectRawPdfBodyIfPresent(event, context);
       if (rawBodyRejection) {
         return withCors(rawBodyRejection, corsHeaders);
       }
+    }
+
+    const { maxBodyBytes } = getConfig();
+    if (getRequestBodySize(event) > maxBodyBytes) {
+      return withCors(
+        errorResponse(413, "request_too_large", `Request body exceeds ${maxBodyBytes} bytes`, context.requestId),
+        corsHeaders,
+      );
     }
 
     if (route.length === 2 && route[0] === "google-drive" && route[1] === "callback" && event.httpMethod === "GET") {

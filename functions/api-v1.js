@@ -1860,17 +1860,30 @@ async function handleUpdateItem(supabase, principal, context, vaultId, itemId, e
   }
 
   if (Object.keys(updateRow).length > 0) {
-    updateRow.version = (existingResult.data.version || 1) + 1;
-    updateRow.updated_at = new Date().toISOString();
+    const rollupResult = await supabase.rpc("update_vault_publication_with_rollup", {
+      p_vault_publication_id: itemId,
+      p_vault_id: vaultId,
+      p_patch: updateRow,
+      p_actor_user_id: principal.userId,
+    });
 
-    const updateResult = await supabase
-      .from("vault_publications")
-      .update(updateRow)
-      .eq("id", itemId)
-      .eq("vault_id", vaultId);
+    if (rollupResult.error) {
+      // P0002 is the SQL function's own not-found raise (its WHERE id/vault_id
+      // matched nothing) — this can happen via a race even though we just
+      // checked existence above (item deleted in between). Map it to the same
+      // 404 the pre-check above would have returned, rather than the generic
+      // 502 reserved for genuine rollup/infrastructure failures.
+      if (rollupResult.error.code === "P0002") {
+        return errorResponse(404, "item_not_found", "Vault item not found", context.requestId);
+      }
 
-    if (updateResult.error) {
-      throw updateResult.error;
+      return errorResponse(
+        502,
+        "publication_rollup_failed",
+        "Failed to apply the update across the canonical publication and its vault copies",
+        context.requestId,
+        { postgres_message: rollupResult.error.message },
+      );
     }
   }
 

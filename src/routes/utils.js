@@ -73,6 +73,24 @@ export function pickPublicationFields(input) {
 }
 
 /**
+ * Same field allow-list as pickPublicationFields, but for partial updates:
+ * only fields actually present in the input are included, with no defaults
+ * applied. pickPublicationFields' defaults (empty arrays, 'article' type)
+ * are correct for creating a new row but wipe existing values when reused
+ * for a partial update, since any field the caller omits should stay
+ * untouched.
+ */
+export function pickPublicationFieldsForUpdate(input) {
+  const row = {};
+  for (const field of PUBLICATION_FIELDS) {
+    if (input[field] !== undefined) {
+      row[field] = input[field];
+    }
+  }
+  return row;
+}
+
+/**
  * Validate that all provided tag IDs belong to the given vault.
  * Throws an error with code 'invalid_tag_ids' if any are missing.
  * Returns the original tagIds array unchanged on success.

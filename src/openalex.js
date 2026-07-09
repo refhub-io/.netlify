@@ -247,3 +247,23 @@ export async function fetchOpenAlexSearch({ apiKey, query, limit, signal }) {
 }
 
 export const OPENALEX_SEARCH_COST_USD = 0.001;
+
+const OPENALEX_BUDGET_BUCKET_KEY = "global";
+
+export async function takeOpenAlexBudget(supabase, config, costUsd) {
+  const { data, error } = await supabase.rpc("take_openalex_budget", {
+    p_bucket_key: OPENALEX_BUDGET_BUCKET_KEY,
+    p_cost_usd: costUsd,
+    p_daily_budget_usd: config.openalexDailyBudgetUsd,
+  });
+
+  if (error) {
+    throw error;
+  }
+
+  const row = Array.isArray(data) ? data[0] : data;
+  return {
+    allowed: Boolean(row?.allowed),
+    spentUsd: row?.spent_usd ?? null,
+  };
+}

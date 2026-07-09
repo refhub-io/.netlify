@@ -345,3 +345,40 @@ describe("fetchOpenAlexSearch", () => {
     ).rejects.toMatchObject({ code: "openalex_error" });
   });
 });
+
+import { takeOpenAlexBudget } from "../src/openalex.js";
+
+describe("takeOpenAlexBudget", () => {
+  const config = { openalexDailyBudgetUsd: 1.0 };
+
+  it("calls the global budget RPC with the configured daily budget", async () => {
+    const rpc = vi.fn().mockResolvedValue({ data: [{ allowed: true, spent_usd: 0.0001 }], error: null });
+    const supabase = { rpc };
+
+    const result = await takeOpenAlexBudget(supabase, config, 0.0001);
+
+    expect(result).toEqual({ allowed: true, spentUsd: 0.0001 });
+    expect(rpc).toHaveBeenCalledWith("take_openalex_budget", {
+      p_bucket_key: "global",
+      p_cost_usd: 0.0001,
+      p_daily_budget_usd: 1.0,
+    });
+  });
+
+  it("reports not-allowed when the RPC says the budget would be exceeded", async () => {
+    const supabase = {
+      rpc: vi.fn().mockResolvedValue({ data: [{ allowed: false, spent_usd: 1.0 }], error: null }),
+    };
+
+    const result = await takeOpenAlexBudget(supabase, config, 0.001);
+    expect(result).toEqual({ allowed: false, spentUsd: 1.0 });
+  });
+
+  it("throws if the RPC call itself fails", async () => {
+    const supabase = {
+      rpc: vi.fn().mockResolvedValue({ data: null, error: new Error("connection refused") }),
+    };
+
+    await expect(takeOpenAlexBudget(supabase, config, 0.0001)).rejects.toThrow("connection refused");
+  });
+});

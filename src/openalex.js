@@ -223,3 +223,27 @@ export async function fetchOpenAlexCitations({ apiKey, doi, limit, signal }) {
 }
 
 export const OPENALEX_CITATIONS_COST_USD = 0.0001;
+
+export async function fetchOpenAlexSearch({ apiKey, query, limit, signal }) {
+  const url = withApiKey(new URL(`${OPENALEX_BASE_URL}/works`), apiKey);
+  url.searchParams.set("search", query);
+  url.searchParams.set("select", OPENALEX_HYDRATE_FIELDS.join(","));
+  url.searchParams.set("per-page", String(limit));
+
+  const response = await requestOpenAlex(url, {
+    method: "GET",
+    headers: { accept: "application/json" },
+    signal,
+  });
+  assertSuccessfulOpenAlexResponse(response, {
+    code: "openalex_error",
+    message: "OpenAlex search failed",
+    status: 502,
+  });
+
+  const payload = await response.json();
+  const results = Array.isArray(payload.results) ? payload.results : [];
+  return results.map(normalizePaperFromWork);
+}
+
+export const OPENALEX_SEARCH_COST_USD = 0.001;

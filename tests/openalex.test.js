@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { reconstructAbstractFromInvertedIndex, normalizePaperFromWork, fetchOpenAlexDoiMetadata, fetchOpenAlexReferences, fetchOpenAlexCitations } from "../src/openalex.js";
+import { reconstructAbstractFromInvertedIndex, normalizePaperFromWork, fetchOpenAlexDoiMetadata, fetchOpenAlexReferences, fetchOpenAlexCitations, fetchOpenAlexSearch } from "../src/openalex.js";
 
 describe("reconstructAbstractFromInvertedIndex", () => {
   it("reorders words back into original sentence order", () => {
@@ -306,6 +306,42 @@ describe("fetchOpenAlexCitations", () => {
 
     await expect(
       fetchOpenAlexCitations({ apiKey: "test-key", doi: "10.1/x", limit: 10, signal: undefined }),
+    ).rejects.toMatchObject({ code: "openalex_error" });
+  });
+});
+
+describe("fetchOpenAlexSearch", () => {
+  beforeEach(() => {
+    vi.stubGlobal("fetch", vi.fn());
+  });
+
+  it("searches and normalizes results", async () => {
+    vi.mocked(fetch).mockResolvedValue(
+      new Response(
+        JSON.stringify({ results: [{ id: "https://openalex.org/W1", title: "Visual Analytics Survey" }] }),
+        { status: 200 },
+      ),
+    );
+
+    const papers = await fetchOpenAlexSearch({
+      apiKey: "test-key",
+      query: "visual analytics",
+      limit: 20,
+      signal: undefined,
+    });
+
+    expect(papers).toEqual([expect.objectContaining({ paper_id: "W1", title: "Visual Analytics Survey" })]);
+
+    const [calledUrl] = vi.mocked(fetch).mock.calls.map((call) => String(call[0]));
+    expect(calledUrl).toContain("search=visual+analytics");
+    expect(calledUrl).toContain("per-page=20");
+  });
+
+  it("throws openalex_error on a failed search", async () => {
+    vi.mocked(fetch).mockResolvedValue(new Response("{}", { status: 500 }));
+
+    await expect(
+      fetchOpenAlexSearch({ apiKey: "test-key", query: "x", limit: 20, signal: undefined }),
     ).rejects.toMatchObject({ code: "openalex_error" });
   });
 });

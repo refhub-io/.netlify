@@ -3,11 +3,11 @@
 ## Problem
 
 Semantic Scholar is the only external metadata/discovery provider today. Even
-after fixing the rate limiter to be a real global bucket (see
-`2026-07-09` rate-limit work, PR #27), the whole backend still shares one
-Semantic Scholar API key at roughly 1 req/sec, globally, across every RefHub
-user. That's a hard ceiling that can't grow without a different Semantic
-Scholar pricing tier.
+after fixing the rate limiter to be a real global bucket (see the
+rate-limit work, PR #27), the whole backend still shares one Semantic
+Scholar API key at roughly 1 req/sec, globally, across every RefHub user.
+That's a hard ceiling that can't grow without a different Semantic Scholar
+pricing tier.
 
 OpenAlex has just introduced a usage-based API (Feb 2026) with a free key.
 For the operations RefHub actually needs, it is dramatically higher capacity:
@@ -25,15 +25,14 @@ recommendations, which only Semantic Scholar offers.
 
 ## Goals
 
-- OpenAlex primary / Semantic Scholar fallback for: DOI metadata, lookup
-  (DOI or title), references, citations, and topic search.
+- OpenAlex primary / Semantic Scholar fallback for: DOI metadata, references,
+  citations, and topic search.
 - Recommendations (the vault "related papers" batch tab) stays 100%
   Semantic Scholar — OpenAlex has no set-based ML recommender, only a
   precomputed per-paper `related_works` list, which is a different thing.
-- The frontend never has to know which provider answered. Same routes,
-  same request/response shapes as today, for every existing consumer
-  (the web app and `refhub-cli`, which calls these routes directly with a
-  RefHub API key).
+- **Zero route contract changes, zero frontend changes.** Every existing
+  consumer — the web app and `refhub-cli` (which calls these routes
+  directly with a RefHub API key) — keeps working completely unmodified.
 - Never actually get billed by OpenAlex. Hard-stop at the free daily budget
   and fail over to Semantic Scholar instead.
 
@@ -43,36 +42,59 @@ recommendations, which only Semantic Scholar offers.
   for now).
 - No use of OpenAlex's `related_works` field anywhere — recommendations
   stays untouched, still exclusively Semantic Scholar.
-- No renaming of existing route *paths* — `doi-metadata`, `lookup`,
-  `references`, `citations`, `search`, and `recommendations` keep their
-  current URLs. This does **not** mean every request/response shape stays
-  identical: `references`/`citations` specifically must change shape (see
-  Route changes below) since their input can no longer be a pre-resolved,
-  provider-specific `paper_id`. That's a deliberate, flagged break for
-  `refhub-cli`'s `discover` command, not an oversight — see Rollout.
+- No change to `/lookup`'s title-search path. It stays Semantic-Scholar-only,
+  exactly as today. See "Why this needs no route changes" for why that's
+  an acceptable, non-regressing gap rather than a compromise.
+- No renaming of anything. `doi-metadata`, `lookup`, `references`,
+  `citations`, `search`, and `recommendations` are untouched at the
+  route/contract level.
 
-## Why DOI works as the one identifier
+## Why this needs no route changes
 
-Verified live against both APIs (not assumed):
+Checked the actual behavior of both APIs (not assumed) and the actual
+current code (not assumed):
 
-- **Semantic Scholar** accepts `DOI:<doi>` directly as the paper identifier
+- **Semantic Scholar accepts `DOI:<doi>` directly** as the paper identifier
   for the base lookup, `/references`, `/citations`, *and* in
-  `positivePaperIds` for `/recommendations/v1/papers`. No separate
-  lookup-to-internal-ID step is ever required on the Semantic Scholar side.
-- **OpenAlex** accepts a DOI directly for `GET /works/doi:{doi}`, which
-  returns `referenced_works` (reference list) and `related_works` embedded
-  in the same free response. Its `cites`/`cited_by` filter, however,
-  requires OpenAlex's own `W...` ID, not a DOI — so citations need one
-  internal (free) DOI→work hop before the (cheap) filter call. This is
-  invisible outside `src/openalex.js`.
-- For publications with **no DOI**, both providers support a title-based
-  secondary path (OpenAlex `works?search=`, Semantic Scholar
-  `/paper/search`), used only when the DOI path isn't available.
+  `positivePaperIds` for `/recommendations/v1/papers`. Verified live against
+  `api.semanticscholar.org`.
+- **`/lookup`'s existing DOI path already exploits this** — for
+  `queryType === "doi"`, `handlePaperLookup` (`functions/api-v1.js:780-785`)
+  doesn't call Semantic Scholar at all. It just echoes back
+  `paper_id: DOI:<doi>`:
 
-Because DOI is a first-class identifier on both sides, no route needs to
-pre-resolve to a provider-specific opaque ID, and no route needs to reason
-about "whose ID is this." Every route's external contract is `{doi, title}`
-in, normalized papers out — never a provider ID.
+  ```js
+  if (queryType === "doi") {
+    const normalizedDoi = queryValue.replace(/^doi:/i, "").trim();
+    return json(200, { data: { paper_id: `DOI:${normalizedDoi}` }, ... });
+  }
+  ```
+
+  That `DOI:<doi>` value is already what flows into `references`,
+  `citations`, and `recommendations` today for any publication with a DOI.
+  It was already provider-agnostic before this feature existed — it just
+  happened to only ever be sent to one provider.
+- **OpenAlex also accepts a bare DOI directly**, for `GET
+  /works/doi:{doi}`, which returns `referenced_works` and `related_works`
+  embedded in the same free response. Its `cites`/`cited_by` filter,
+  however, needs OpenAlex's own `W...` ID — one internal (free) DOI→work
+  hop handles that, invisible outside `src/openalex.js`.
+
+So the `paper_id` field already carries a DOI (prefixed `DOI:`) whenever a
+publication has one — which is the large majority of vault publications.
+`references`/`citations`/`recommendations` don't need a new identifier
+concept; they need to recognize a `paper_id` they're already receiving and,
+for the two OpenAlex-eligible routes, try OpenAlex first with the bare DOI.
+
+**The one thing this doesn't cover**: publications with no DOI, resolved
+via `/lookup`'s title-search path, which returns a Semantic-Scholar-native
+opaque hash (not DOI-shaped). For those, `references`/`citations` still
+only try Semantic Scholar — no fallback is attempted, because there's no
+DOI to hand to OpenAlex. **This is not a regression** — today, a title-only
+paper only ever gets a single shot at Semantic Scholar anyway. It simply
+doesn't gain the new capacity/cost benefit. Given DOI coverage is the
+common case, this is an acceptable v1 gap rather than something to build
+more machinery around.
 
 ## Architecture
 
@@ -89,7 +111,6 @@ Mirrors the shape of the existing `src/semantic-scholar.js`:
   (that helper should move somewhere shared rather than being duplicated a
   third time).
 - `fetchOpenAlexDoiMetadata({ apiKey, doi, signal })`
-- `fetchOpenAlexPaperLookup({ apiKey, queryType: 'doi' | 'title', queryValue, signal })`
 - `fetchOpenAlexReferences({ apiKey, doi, limit, signal })` — one free
   DOI→work fetch, then hydrates the `referenced_works` id list into full
   paper objects via one `works?filter=openalex_id:ID1|ID2|...` batch call
@@ -106,9 +127,13 @@ Mirrors the shape of the existing `src/semantic-scholar.js`:
   RefHub-internal code, `openalex_budget_exceeded`, raised by
   `takeOpenAlexBudget` itself rather than by any upstream response.
 
+No `fetchOpenAlexPaperLookup`/title-search fetcher is needed — `/lookup`'s
+title path is out of scope (see above).
+
 ### Shared wrapper: `withProviderFallback`
 
-One helper, used by every route except recommendations:
+One helper, used inside `references`, `citations`, `doi-metadata`, and
+`search` — never in `recommendations` or `/lookup`'s title path:
 
 ```js
 async function withProviderFallback({ primary, fallback, isFallbackEligible }) {
@@ -127,6 +152,12 @@ async function withProviderFallback({ primary, fallback, isFallbackEligible }) {
 (`OPENALEX_API_KEY` unset), `primary` is skipped entirely and the route goes
 straight to Semantic Scholar — same graceful-degradation shape the
 `doi-metadata` route already uses today for a missing Semantic Scholar key.
+
+For `references`/`citations` specifically: `withProviderFallback` is only
+invoked when the incoming `paper_id` matches `/^DOI:/i`. If it doesn't
+(a Semantic-Scholar-native hash from a title-only `/lookup` resolution),
+the handler calls Semantic Scholar directly, unchanged from today, and
+`src/openalex.js` is never touched for that request.
 
 Each response gets one additive field, `meta.provider: "openalex" |
 "semantic_scholar"`, so we can observe fallback frequency once this is live.
@@ -166,35 +197,27 @@ budget a key gets).
 
 ### Route changes (`functions/api-v1.js`)
 
-`doi-metadata`, `lookup`, `references`, `citations`, `search` each wrap
-their existing single-provider call in `withProviderFallback`. Request
-bodies for `references`/`citations` change from `{ paper_id, limit }` to
-`{ doi?, title?, limit }` (title used only when `doi` is absent) — this is
-a breaking shape change for those two routes specifically, since the old
-`paper_id` concept (Semantic-Scholar-only, pre-resolved via `/lookup`) no
-longer has a cross-provider equivalent. `refhub-cli`'s `discover` command
-uses these routes and will need a matching update (tracked separately, not
-in this repo).
-
-`recommendations` changes from taking a pre-resolved `paper_id` to taking
-`{ doi?, title? }` per seed directly (`positivePaperIds` built from
-`DOI:<doi>` where available, falling back to an internal
-Semantic-Scholar-only title lookup per seed otherwise) — but stays
-exclusively Semantic Scholar; `withProviderFallback` is not used here at
-all.
+- `doi-metadata`: wraps its existing single-provider call in
+  `withProviderFallback`. Already takes `{ doi }` directly — no shape
+  detection needed.
+- `search`: wraps its existing single-provider call in
+  `withProviderFallback`. Already takes `{ query, limit }` directly — no
+  DOI involved at all.
+- `references`/`citations`: **no request/response shape change.** Still
+  `{ paper_id, limit }` in, normalized papers out. Internally: if
+  `paper_id` is `DOI:`-prefixed, strip it and run it through
+  `withProviderFallback` (OpenAlex primary, Semantic Scholar fallback);
+  otherwise call Semantic Scholar directly, exactly as today.
+- `lookup`: **no change at all.** DOI path already returns a
+  provider-agnostic `DOI:<doi>` value; title path stays Semantic-Scholar-only.
+- `recommendations`: **no change at all.** It's exclusively Semantic
+  Scholar and already accepts `DOI:`-prefixed seed IDs — nothing here
+  depends on OpenAlex existing.
 
 ### Frontend changes (`refhub.io`)
 
-- `lookupPaperByDOI`/`lookupPaperByTitle`/`resolveSelectedPaperIds` and the
-  `ResolvedPaper`/`resolvedPaperIds` ref in `VaultAugmentDialog.tsx` are
-  deleted — no route needs a pre-resolved ID anymore.
-- `getReferences`/`getCitations` take `{ doi?, title? }` instead of a
-  `paperId` string.
-- `getRecommendationsForSet` takes `{ doi?, title? }[]` instead of
-  `paperId[]`.
-- `fetchRelated` and `fetchTabData` in `VaultAugmentDialog.tsx` build seeds
-  directly from `publications`/the selected publication, no lookup stage
-  first.
+None. The web app calls the same routes with the same shapes it already
+does; this entire feature is invisible to it.
 
 ## Testing plan
 
@@ -208,22 +231,25 @@ all.
   returned), primary fails with an ineligible error (throws, fallback
   never called), OpenAlex not configured (fallback called directly,
   primary never invoked).
-- Handler-level tests per route: OpenAlex succeeds → no SS call; OpenAlex
-  budget-exceeded → SS called, response still 200 with the right shape;
-  both fail → real error surfaced. One explicit test asserting the
-  recommendations route never imports or calls anything from
-  `openalex.js`.
-- Frontend: updated tests for `getReferences`/`getCitations`/
-  `getRecommendationsForSet`'s new request shapes; a test confirming
-  `VaultAugmentDialog` no longer references `lookupPaperByDOI`/`ByTitle`.
+- Handler-level tests per route:
+  - `references`/`citations`: `DOI:`-prefixed `paper_id` → OpenAlex tried
+    first, Semantic Scholar on eligible failure; non-DOI `paper_id` →
+    Semantic Scholar only, `src/openalex.js` never invoked.
+  - `doi-metadata`/`search`: OpenAlex succeeds → no SS call; OpenAlex
+    budget-exceeded → SS called, response still 200 with the right shape;
+    both fail → real error surfaced.
+  - `lookup`: unchanged behavior, regression test only.
+  - One explicit test asserting the recommendations route never imports or
+    calls anything from `openalex.js`.
+- No frontend test changes needed — nothing there changes.
 
 ## Rollout
 
-- New branch off current `main` (both `refhub.io` and `.netlify`), separate
-  from the rate-limit PRs (#151, #27). Once those merge, this branch
-  rebases onto the updated `main` to pick up the global rate-limit bucket
-  and batched-recommendations work, since recommendations' DOI-based
-  `positivePaperIds` change builds directly on that PR's
+- New branch (`.netlify` only — `refhub.io` needs no code change, just the
+  git-ignored migration file, matching the rate-limit PR's pattern), based
+  off current `main`, separate from the still-unmerged rate-limit PRs
+  (#151, #27). Rebase onto updated `main` once those merge, since
+  `recommendations` already relies on that PR's batched
   `fetchSemanticScholarRecommendations` signature.
 - Migration applied to production the same way as the rate-limit one:
   user runs it directly (git-ignored in this repo), before the `.netlify`

@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { reconstructAbstractFromInvertedIndex, normalizePaperFromWork, fetchOpenAlexDoiMetadata } from "../src/openalex.js";
+import { reconstructAbstractFromInvertedIndex, normalizePaperFromWork, fetchOpenAlexDoiMetadata, fetchOpenAlexReferences } from "../src/openalex.js";
 
 describe("reconstructAbstractFromInvertedIndex", () => {
   it("reorders words back into original sentence order", () => {
@@ -144,5 +144,100 @@ describe("fetchOpenAlexDoiMetadata", () => {
 
     const [calledUrl] = vi.mocked(fetch).mock.calls[0];
     expect(String(calledUrl)).not.toContain("api_key");
+  });
+});
+
+describe("fetchOpenAlexReferences", () => {
+  beforeEach(() => {
+    vi.stubGlobal("fetch", vi.fn());
+  });
+
+  it("fetches the work, then hydrates referenced_works into full papers", async () => {
+    vi.mocked(fetch)
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            id: "https://openalex.org/W2159974629",
+            referenced_works: [
+              "https://openalex.org/W111",
+              "https://openalex.org/W222",
+            ],
+          }),
+          { status: 200 },
+        ),
+      )
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            results: [
+              { id: "https://openalex.org/W111", title: "Ref One" },
+              { id: "https://openalex.org/W222", title: "Ref Two" },
+            ],
+          }),
+          { status: 200 },
+        ),
+      );
+
+    const papers = await fetchOpenAlexReferences({
+      apiKey: "test-key",
+      doi: "10.1038/nature12373",
+      limit: 10,
+      signal: undefined,
+    });
+
+    expect(papers).toEqual([
+      expect.objectContaining({ paper_id: "W111", title: "Ref One" }),
+      expect.objectContaining({ paper_id: "W222", title: "Ref Two" }),
+    ]);
+
+    expect(fetch).toHaveBeenCalledTimes(2);
+    const [, secondUrl] = vi.mocked(fetch).mock.calls.map((call) => String(call[0]));
+    expect(secondUrl).toContain("filter=openalex_id%3AW111%7CW222");
+  });
+
+  it("returns an empty array without a hydration call when there are no references", async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(
+      new Response(JSON.stringify({ id: "https://openalex.org/W1", referenced_works: [] }), { status: 200 }),
+    );
+
+    const papers = await fetchOpenAlexReferences({
+      apiKey: "test-key",
+      doi: "10.1/x",
+      limit: 10,
+      signal: undefined,
+    });
+
+    expect(papers).toEqual([]);
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("respects the limit by truncating referenced_works before hydrating", async () => {
+    vi.mocked(fetch)
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            id: "https://openalex.org/W1",
+            referenced_works: ["https://openalex.org/W1", "https://openalex.org/W2", "https://openalex.org/W3"],
+          }),
+          { status: 200 },
+        ),
+      )
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ results: [{ id: "https://openalex.org/W1", title: "One" }] }), { status: 200 }),
+      );
+
+    await fetchOpenAlexReferences({ apiKey: "test-key", doi: "10.1/x", limit: 1, signal: undefined });
+
+    const [, secondUrl] = vi.mocked(fetch).mock.calls.map((call) => String(call[0]));
+    expect(secondUrl).toContain("filter=openalex_id%3AW1");
+    expect(secondUrl).not.toContain("W2");
+  });
+
+  it("throws openalex_not_found when the seed work doesn't exist", async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(new Response("{}", { status: 404 }));
+
+    await expect(
+      fetchOpenAlexReferences({ apiKey: "test-key", doi: "10.1/missing", limit: 10, signal: undefined }),
+    ).rejects.toMatchObject({ code: "openalex_not_found" });
   });
 });

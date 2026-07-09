@@ -1,5 +1,18 @@
 const OPENALEX_BASE_URL = "https://api.openalex.org";
 
+const OPENALEX_HYDRATE_FIELDS = [
+  "id",
+  "doi",
+  "title",
+  "publication_year",
+  "primary_location",
+  "cited_by_count",
+  "open_access",
+  "best_oa_location",
+  "authorships",
+  "abstract_inverted_index",
+];
+
 export function reconstructAbstractFromInvertedIndex(invertedIndex) {
   const words = [];
   for (const [word, positions] of Object.entries(invertedIndex)) {
@@ -127,4 +140,47 @@ export async function fetchOpenAlexDoiMetadata({ apiKey, doi, signal }) {
       : undefined,
     type: classifyOpenAlexType(work.type),
   };
+}
+
+export async function fetchOpenAlexReferences({ apiKey, doi, limit, signal }) {
+  const workUrl = withApiKey(new URL(`${OPENALEX_BASE_URL}/works/doi:${encodeURIComponent(doi)}`), apiKey);
+  const workResponse = await requestOpenAlex(workUrl, {
+    method: "GET",
+    headers: { accept: "application/json" },
+    signal,
+  });
+  assertSuccessfulOpenAlexResponse(workResponse, {
+    code: "openalex_not_found",
+    message: "OpenAlex work was not found",
+    status: 404,
+  });
+
+  const work = await workResponse.json();
+  const referencedIds = Array.isArray(work.referenced_works)
+    ? work.referenced_works.slice(0, limit).map(stripOpenAlexIdPrefix)
+    : [];
+
+  if (referencedIds.length === 0) {
+    return [];
+  }
+
+  const listUrl = withApiKey(new URL(`${OPENALEX_BASE_URL}/works`), apiKey);
+  listUrl.searchParams.set("filter", `openalex_id:${referencedIds.join("|")}`);
+  listUrl.searchParams.set("select", OPENALEX_HYDRATE_FIELDS.join(","));
+  listUrl.searchParams.set("per-page", String(referencedIds.length));
+
+  const listResponse = await requestOpenAlex(listUrl, {
+    method: "GET",
+    headers: { accept: "application/json" },
+    signal,
+  });
+  assertSuccessfulOpenAlexResponse(listResponse, {
+    code: "openalex_error",
+    message: "OpenAlex reference lookup failed",
+    status: 502,
+  });
+
+  const payload = await listResponse.json();
+  const results = Array.isArray(payload.results) ? payload.results : [];
+  return results.map(normalizePaperFromWork).slice(0, limit);
 }

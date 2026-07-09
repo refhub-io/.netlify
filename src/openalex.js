@@ -95,3 +95,36 @@ export function normalizePaperFromWork(work) {
       : [],
   };
 }
+
+export async function fetchOpenAlexDoiMetadata({ apiKey, doi, signal }) {
+  const url = withApiKey(new URL(`${OPENALEX_BASE_URL}/works/doi:${encodeURIComponent(doi)}`), apiKey);
+
+  const response = await requestOpenAlex(url, {
+    method: "GET",
+    headers: { accept: "application/json" },
+    signal,
+  });
+  assertSuccessfulOpenAlexResponse(response, {
+    code: "openalex_not_found",
+    message: "OpenAlex work was not found",
+    status: 404,
+  });
+
+  const work = await response.json();
+  const authors = Array.isArray(work.authorships)
+    ? work.authorships.map((a) => a.author?.display_name || "Unknown Author")
+    : [];
+
+  return {
+    title: work.title || "Untitled",
+    authors,
+    year: work.publication_year || undefined,
+    journal: work.primary_location?.source?.display_name || undefined,
+    doi,
+    url: `https://doi.org/${doi}`,
+    abstract: work.abstract_inverted_index
+      ? reconstructAbstractFromInvertedIndex(work.abstract_inverted_index)
+      : undefined,
+    type: classifyOpenAlexType(work.type),
+  };
+}

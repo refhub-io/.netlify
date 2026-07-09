@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { reconstructAbstractFromInvertedIndex, normalizePaperFromWork } from "../src/openalex.js";
+import { reconstructAbstractFromInvertedIndex, normalizePaperFromWork, fetchOpenAlexDoiMetadata } from "../src/openalex.js";
 
 describe("reconstructAbstractFromInvertedIndex", () => {
   it("reorders words back into original sentence order", () => {
@@ -72,5 +72,77 @@ describe("normalizePaperFromWork", () => {
       open_access_pdf_url: null,
       authors: [],
     });
+  });
+});
+
+describe("fetchOpenAlexDoiMetadata", () => {
+  beforeEach(() => {
+    vi.stubGlobal("fetch", vi.fn());
+  });
+
+  it("fetches and normalizes DOI metadata to the BibTeX-like shape", async () => {
+    vi.mocked(fetch).mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          id: "https://openalex.org/W2159974629",
+          doi: "https://doi.org/10.1038/nature12373",
+          title: "Nanometre-scale thermometry in a living cell",
+          publication_year: 2013,
+          type: "article",
+          primary_location: { source: { display_name: "Nature" } },
+          abstract_inverted_index: { Quantum: [0], sensing: [1] },
+          authorships: [{ author: { display_name: "Georg Kucsko" } }],
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      ),
+    );
+
+    const metadata = await fetchOpenAlexDoiMetadata({
+      apiKey: "test-key",
+      doi: "10.1038/nature12373",
+      signal: undefined,
+    });
+
+    expect(metadata).toEqual({
+      title: "Nanometre-scale thermometry in a living cell",
+      authors: ["Georg Kucsko"],
+      year: 2013,
+      journal: "Nature",
+      doi: "10.1038/nature12373",
+      url: "https://doi.org/10.1038/nature12373",
+      abstract: "Quantum sensing",
+      type: "article",
+    });
+
+    const [calledUrl] = vi.mocked(fetch).mock.calls[0];
+    expect(String(calledUrl)).toBe(
+      "https://api.openalex.org/works/doi:10.1038%2Fnature12373?api_key=test-key",
+    );
+  });
+
+  it("classifies dissertation/book-chapter/conference-paper types correctly", async () => {
+    vi.mocked(fetch).mockResolvedValue(
+      new Response(JSON.stringify({ title: "A Thesis", type: "dissertation" }), { status: 200 }),
+    );
+
+    const metadata = await fetchOpenAlexDoiMetadata({ apiKey: null, doi: "10.1/x", signal: undefined });
+    expect(metadata.type).toBe("thesis");
+  });
+
+  it("throws openalex_not_found on 404", async () => {
+    vi.mocked(fetch).mockResolvedValue(new Response("{}", { status: 404 }));
+
+    await expect(
+      fetchOpenAlexDoiMetadata({ apiKey: "test-key", doi: "10.1/missing", signal: undefined }),
+    ).rejects.toMatchObject({ code: "openalex_not_found", status: 404 });
+  });
+
+  it("omits api_key param when no key is configured", async () => {
+    vi.mocked(fetch).mockResolvedValue(new Response(JSON.stringify({ title: "X" }), { status: 200 }));
+
+    await fetchOpenAlexDoiMetadata({ apiKey: null, doi: "10.1/x", signal: undefined });
+
+    const [calledUrl] = vi.mocked(fetch).mock.calls[0];
+    expect(String(calledUrl)).not.toContain("api_key");
   });
 });

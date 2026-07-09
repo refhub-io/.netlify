@@ -240,4 +240,22 @@ describe("fetchOpenAlexReferences", () => {
       fetchOpenAlexReferences({ apiKey: "test-key", doi: "10.1/missing", limit: 10, signal: undefined }),
     ).rejects.toMatchObject({ code: "openalex_not_found" });
   });
+
+  it("throws openalex_error when the hydration call fails", async () => {
+    vi.mocked(fetch)
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            id: "https://openalex.org/W2159974629",
+            referenced_works: ["https://openalex.org/W111"],
+          }),
+          { status: 200 },
+        ),
+      )
+      .mockResolvedValueOnce(new Response("{}", { status: 500 }));
+
+    await expect(
+      fetchOpenAlexReferences({ apiKey: "test-key", doi: "10.1038/nature12373", limit: 10, signal: undefined }),
+    ).rejects.toMatchObject({ code: "openalex_error" });
+  });
 });

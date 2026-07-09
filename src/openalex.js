@@ -184,3 +184,42 @@ export async function fetchOpenAlexReferences({ apiKey, doi, limit, signal }) {
   const results = Array.isArray(payload.results) ? payload.results : [];
   return results.map(normalizePaperFromWork).slice(0, limit);
 }
+
+export async function fetchOpenAlexCitations({ apiKey, doi, limit, signal }) {
+  const workUrl = withApiKey(new URL(`${OPENALEX_BASE_URL}/works/doi:${encodeURIComponent(doi)}`), apiKey);
+  const workResponse = await requestOpenAlex(workUrl, {
+    method: "GET",
+    headers: { accept: "application/json" },
+    signal,
+  });
+  assertSuccessfulOpenAlexResponse(workResponse, {
+    code: "openalex_not_found",
+    message: "OpenAlex work was not found",
+    status: 404,
+  });
+
+  const work = await workResponse.json();
+  const workId = stripOpenAlexIdPrefix(work.id);
+
+  const listUrl = withApiKey(new URL(`${OPENALEX_BASE_URL}/works`), apiKey);
+  listUrl.searchParams.set("filter", `cites:${workId}`);
+  listUrl.searchParams.set("select", OPENALEX_HYDRATE_FIELDS.join(","));
+  listUrl.searchParams.set("per-page", String(limit));
+
+  const listResponse = await requestOpenAlex(listUrl, {
+    method: "GET",
+    headers: { accept: "application/json" },
+    signal,
+  });
+  assertSuccessfulOpenAlexResponse(listResponse, {
+    code: "openalex_error",
+    message: "OpenAlex citation lookup failed",
+    status: 502,
+  });
+
+  const payload = await listResponse.json();
+  const results = Array.isArray(payload.results) ? payload.results : [];
+  return results.map(normalizePaperFromWork);
+}
+
+export const OPENALEX_CITATIONS_COST_USD = 0.0001;

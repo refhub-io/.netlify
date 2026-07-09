@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { reconstructAbstractFromInvertedIndex, normalizePaperFromWork, fetchOpenAlexDoiMetadata, fetchOpenAlexReferences } from "../src/openalex.js";
+import { reconstructAbstractFromInvertedIndex, normalizePaperFromWork, fetchOpenAlexDoiMetadata, fetchOpenAlexReferences, fetchOpenAlexCitations } from "../src/openalex.js";
 
 describe("reconstructAbstractFromInvertedIndex", () => {
   it("reorders words back into original sentence order", () => {
@@ -256,6 +256,56 @@ describe("fetchOpenAlexReferences", () => {
 
     await expect(
       fetchOpenAlexReferences({ apiKey: "test-key", doi: "10.1038/nature12373", limit: 10, signal: undefined }),
+    ).rejects.toMatchObject({ code: "openalex_error" });
+  });
+});
+
+describe("fetchOpenAlexCitations", () => {
+  beforeEach(() => {
+    vi.stubGlobal("fetch", vi.fn());
+  });
+
+  it("fetches the work for its id, then filters by cites:{id}", async () => {
+    vi.mocked(fetch)
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ id: "https://openalex.org/W2159974629" }), { status: 200 }),
+      )
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({ results: [{ id: "https://openalex.org/W999", title: "Citing Paper" }] }),
+          { status: 200 },
+        ),
+      );
+
+    const papers = await fetchOpenAlexCitations({
+      apiKey: "test-key",
+      doi: "10.1038/nature12373",
+      limit: 5,
+      signal: undefined,
+    });
+
+    expect(papers).toEqual([expect.objectContaining({ paper_id: "W999", title: "Citing Paper" })]);
+
+    const [, secondUrl] = vi.mocked(fetch).mock.calls.map((call) => String(call[0]));
+    expect(secondUrl).toContain("filter=cites%3AW2159974629");
+    expect(secondUrl).toContain("per-page=5");
+  });
+
+  it("throws openalex_not_found when the seed work doesn't exist", async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(new Response("{}", { status: 404 }));
+
+    await expect(
+      fetchOpenAlexCitations({ apiKey: "test-key", doi: "10.1/missing", limit: 10, signal: undefined }),
+    ).rejects.toMatchObject({ code: "openalex_not_found" });
+  });
+
+  it("throws openalex_error when the filter call itself fails", async () => {
+    vi.mocked(fetch)
+      .mockResolvedValueOnce(new Response(JSON.stringify({ id: "https://openalex.org/W1" }), { status: 200 }))
+      .mockResolvedValueOnce(new Response("{}", { status: 500 }));
+
+    await expect(
+      fetchOpenAlexCitations({ apiKey: "test-key", doi: "10.1/x", limit: 10, signal: undefined }),
     ).rejects.toMatchObject({ code: "openalex_error" });
   });
 });

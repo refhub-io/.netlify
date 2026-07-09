@@ -4,8 +4,77 @@ import {
   fetchSemanticScholarDoiMetadata,
   fetchSemanticScholarRecommendations,
   fetchSemanticScholarSearch,
+  normalizeRecommendationsRequest,
   normalizeSemanticScholarSearchRequest,
+  takeSemanticScholarRateLimit,
 } from "../src/semantic-scholar.js";
+
+describe("normalizeRecommendationsRequest", () => {
+  it("accepts a batch of seed paper ids", () => {
+    expect(normalizeRecommendationsRequest({ paper_ids: ["p1", "p2", "p2", " p3 "], limit: 5 })).toEqual({
+      value: { seedPaperIds: ["p1", "p2", "p3"], limit: 5 },
+    });
+  });
+
+  it("still accepts a single legacy paper_id string", () => {
+    expect(normalizeRecommendationsRequest({ paper_id: "p1" })).toEqual({
+      value: { seedPaperIds: ["p1"], limit: 10 },
+    });
+  });
+
+  it("rejects an empty request", () => {
+    expect(normalizeRecommendationsRequest({})).toMatchObject({ error: "invalid_paper_id" });
+    expect(normalizeRecommendationsRequest({ paper_ids: [] })).toMatchObject({ error: "invalid_paper_id" });
+  });
+
+  it("rejects more seed ids than the batch cap", () => {
+    const paperIds = Array.from({ length: 21 }, (_, i) => `p${i}`);
+    expect(normalizeRecommendationsRequest({ paper_ids: paperIds })).toMatchObject({ error: "invalid_paper_id" });
+  });
+
+  it("validates limit the same way as the single-seed routes", () => {
+    expect(normalizeRecommendationsRequest({ paper_id: "p1", limit: 50 })).toMatchObject({ error: "invalid_limit" });
+  });
+});
+
+describe("takeSemanticScholarRateLimit", () => {
+  const config = {
+    semanticScholarRateLimitMaxRequests: 60,
+    semanticScholarRateLimitWindowMs: 60000,
+  };
+
+  it("calls the shared global bucket RPC, not a per-user one", async () => {
+    const rpc = vi.fn().mockResolvedValue({ data: [{ allowed: true, retry_after_seconds: 0 }], error: null });
+    const supabase = { rpc };
+
+    const result = await takeSemanticScholarRateLimit(supabase, config);
+
+    expect(result).toEqual({ allowed: true, retryAfterSeconds: null });
+    expect(rpc).toHaveBeenCalledWith("take_semantic_scholar_rate_limit", {
+      p_bucket_key: "global",
+      p_max_requests: 60,
+      p_window_ms: 60000,
+    });
+  });
+
+  it("surfaces retry_after_seconds when the bucket is exhausted", async () => {
+    const supabase = {
+      rpc: vi.fn().mockResolvedValue({ data: [{ allowed: false, retry_after_seconds: 17 }], error: null }),
+    };
+
+    const result = await takeSemanticScholarRateLimit(supabase, config);
+
+    expect(result).toEqual({ allowed: false, retryAfterSeconds: 17 });
+  });
+
+  it("throws if the RPC call itself fails", async () => {
+    const supabase = {
+      rpc: vi.fn().mockResolvedValue({ data: null, error: new Error("connection refused") }),
+    };
+
+    await expect(takeSemanticScholarRateLimit(supabase, config)).rejects.toThrow("connection refused");
+  });
+});
 
 describe("semantic-scholar upstream errors", () => {
   beforeEach(() => {
@@ -25,7 +94,7 @@ describe("semantic-scholar upstream errors", () => {
     await expect(
       fetchSemanticScholarRecommendations({
         apiKey: "test-key",
-        seedPaperId: "seed-1",
+        seedPaperIds: ["seed-1"],
         limit: 10,
       }),
     ).rejects.toMatchObject({
@@ -34,6 +103,25 @@ describe("semantic-scholar upstream errors", () => {
       details: {
         retry_after_seconds: 17,
       },
+    });
+  });
+
+  it("sends every seed paper id in a single recommendations request", async () => {
+    vi.mocked(fetch).mockResolvedValue(
+      new Response(JSON.stringify({ recommendedPapers: [] }), { status: 200 }),
+    );
+
+    await fetchSemanticScholarRecommendations({
+      apiKey: "test-key",
+      seedPaperIds: ["p1", "p2", "p3"],
+      limit: 10,
+    });
+
+    expect(fetch).toHaveBeenCalledTimes(1);
+    const [, init] = vi.mocked(fetch).mock.calls[0];
+    expect(JSON.parse(init.body)).toEqual({
+      positivePaperIds: ["p1", "p2", "p3"],
+      negativePaperIds: [],
     });
   });
 

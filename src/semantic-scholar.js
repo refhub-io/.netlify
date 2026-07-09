@@ -17,6 +17,31 @@ const SEMANTIC_SCHOLAR_PAPER_FIELDS = [
   "openAccessPdf",
 ];
 
+// A single shared SEMANTIC_SCHOLAR_API_KEY sits behind every request this
+// backend makes, regardless of which user triggered it, so the bucket has to
+// be one global key rather than per-user -- see
+// take_semantic_scholar_rate_limit (supabase/migrations) for why this lives
+// in Postgres instead of an in-process counter.
+const SEMANTIC_SCHOLAR_RATE_LIMIT_BUCKET_KEY = "global";
+
+export async function takeSemanticScholarRateLimit(supabase, config) {
+  const { data, error } = await supabase.rpc("take_semantic_scholar_rate_limit", {
+    p_bucket_key: SEMANTIC_SCHOLAR_RATE_LIMIT_BUCKET_KEY,
+    p_max_requests: config.semanticScholarRateLimitMaxRequests,
+    p_window_ms: config.semanticScholarRateLimitWindowMs,
+  });
+
+  if (error) {
+    throw error;
+  }
+
+  const row = Array.isArray(data) ? data[0] : data;
+  return {
+    allowed: Boolean(row?.allowed),
+    retryAfterSeconds: row?.allowed ? null : row?.retry_after_seconds ?? null,
+  };
+}
+
 function createSemanticScholarError(code, message, status, details = undefined) {
   const error = new Error(message);
   error.code = code;
@@ -185,6 +210,59 @@ export function normalizePaperListRequest(body) {
   };
 }
 
+const MAX_RECOMMENDATION_SEED_IDS = 20;
+
+// Semantic Scholar's recommendations endpoint already accepts multiple seed
+// papers in one request (positivePaperIds is an array) and returns a single
+// combined list -- so a vault's whole "find related papers" pass can be one
+// upstream call instead of one per paper.
+export function normalizeRecommendationsRequest(body) {
+  const rawIds = Array.isArray(body?.paper_ids)
+    ? body.paper_ids
+    : typeof body?.paper_id === "string"
+      ? [body.paper_id]
+      : null;
+
+  if (!rawIds) {
+    return {
+      error: "invalid_paper_id",
+      message: "Body must include a non-empty paper_id string or paper_ids array",
+    };
+  }
+
+  const seedPaperIds = [
+    ...new Set(rawIds.map((id) => (typeof id === "string" ? id.trim() : "")).filter(Boolean)),
+  ];
+
+  if (seedPaperIds.length === 0) {
+    return {
+      error: "invalid_paper_id",
+      message: "Body must include a non-empty paper_id string or paper_ids array",
+    };
+  }
+
+  if (seedPaperIds.length > MAX_RECOMMENDATION_SEED_IDS) {
+    return {
+      error: "invalid_paper_id",
+      message: `paper_ids must contain at most ${MAX_RECOMMENDATION_SEED_IDS} entries`,
+    };
+  }
+
+  const rawLimit = body?.limit;
+  if (rawLimit === undefined || rawLimit === null || rawLimit === "") {
+    return { value: { seedPaperIds, limit: DEFAULT_PAPER_LIST_LIMIT } };
+  }
+
+  if (!Number.isInteger(rawLimit) || rawLimit < 1 || rawLimit > MAX_PAPER_LIST_LIMIT) {
+    return {
+      error: "invalid_limit",
+      message: `limit must be an integer between 1 and ${MAX_PAPER_LIST_LIMIT}`,
+    };
+  }
+
+  return { value: { seedPaperIds, limit: rawLimit } };
+}
+
 export function normalizePaperLookupRequest(body) {
   const doi = typeof body?.doi === "string" ? body.doi.trim() : "";
   const title = typeof body?.title === "string" ? body.title.trim() : "";
@@ -315,7 +393,7 @@ async function fetchSemanticScholarPaperList({
   );
 }
 
-export async function fetchSemanticScholarRecommendations({ apiKey, seedPaperId, limit, signal }) {
+export async function fetchSemanticScholarRecommendations({ apiKey, seedPaperIds, limit, signal }) {
   const url = new URL("https://api.semanticscholar.org/recommendations/v1/papers");
   url.searchParams.set("fields", SEMANTIC_SCHOLAR_PAPER_FIELDS.join(","));
 
@@ -332,7 +410,7 @@ export async function fetchSemanticScholarRecommendations({ apiKey, seedPaperId,
     method: "POST",
     headers,
     body: JSON.stringify({
-      positivePaperIds: [seedPaperId],
+      positivePaperIds: seedPaperIds,
       negativePaperIds: [],
     }),
     signal,
@@ -341,7 +419,7 @@ export async function fetchSemanticScholarRecommendations({ apiKey, seedPaperId,
     code: "paper_not_found",
     message: "Semantic Scholar seed paper was not found",
     status: 404,
-    details: { paper_id: seedPaperId },
+    details: { paper_ids: seedPaperIds },
   });
 
   const payload = await response.json();

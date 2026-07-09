@@ -37,9 +37,12 @@ function makeChain(result) {
  *   Map of table name → { data, error, count }.  Tables not listed resolve
  *   to { data: null, error: null }.
  */
-export function makeMockSupabase(tableResults = {}) {
+const DEFAULT_RATE_LIMIT_RPC_RESULT = { data: [{ allowed: true, retry_after_seconds: 0 }], error: null };
+
+export function makeMockSupabase(tableResults = {}, rpcResults = {}) {
   return {
     from: (table) => makeChain(tableResults[table] ?? { data: null, error: null }),
+    rpc: (fn, args) => Promise.resolve(rpcResults[fn] ?? DEFAULT_RATE_LIMIT_RPC_RESULT),
     auth: {
       getUser: () => Promise.resolve({ data: { user: null }, error: null }),
     },
@@ -53,7 +56,7 @@ export function makeMockSupabase(tableResults = {}) {
  *
  * @param {Record<string, Array<{data?: unknown, error?: unknown, count?: number}>>} tableResultQueues
  */
-export function makeMockSupabaseMulti(tableResultQueues = {}) {
+export function makeMockSupabaseMulti(tableResultQueues = {}, rpcResults = {}) {
   const cursors = {};
   return {
     from: (table) => {
@@ -63,6 +66,7 @@ export function makeMockSupabaseMulti(tableResultQueues = {}) {
       const result = queue[idx] ?? { data: null, error: null };
       return makeChain(result);
     },
+    rpc: (fn, args) => Promise.resolve(rpcResults[fn] ?? DEFAULT_RATE_LIMIT_RPC_RESULT),
     auth: {
       getUser: () => Promise.resolve({ data: { user: null }, error: null }),
     },

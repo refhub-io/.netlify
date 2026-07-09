@@ -49,6 +49,16 @@ import {
   normalizeSemanticScholarSearchRequest,
   takeSemanticScholarRateLimit,
 } from "../src/semantic-scholar.js";
+import {
+  fetchOpenAlexCitations,
+  fetchOpenAlexDoiMetadata,
+  fetchOpenAlexReferences,
+  fetchOpenAlexSearch,
+  OPENALEX_CITATIONS_COST_USD,
+  OPENALEX_SEARCH_COST_USD,
+  takeOpenAlexBudget,
+} from "../src/openalex.js";
+import { withProviderFallback } from "../src/providerFallback.js";
 
 // ── V2 route modules ──────────────────────────────────────────────────────────
 import {
@@ -296,6 +306,17 @@ function ensureSemanticScholarReadScope(principal, context) {
   }
 
   return null;
+}
+
+const OPENALEX_FALLBACK_ELIGIBLE_CODES = new Set([
+  "openalex_not_found",
+  "openalex_error",
+  "openalex_timeout",
+  "openalex_unreachable",
+]);
+
+function isOpenAlexFallbackEligible(error) {
+  return OPENALEX_FALLBACK_ELIGIBLE_CODES.has(error?.code);
 }
 
 async function handleSemanticScholarPaperRoute(context, event, principal, supabase, routeName, fetcher) {
@@ -980,6 +1001,7 @@ async function handleSemanticScholarDoiMetadataRoute(context, event, principal, 
   const { doi } = normalizedRequest.value;
   const cacheKey = `doi-metadata:${doi}`;
   const cached = getCachedSemanticScholarValue(cacheKey);
+  let provider = "cache";
   const metadata = cached.hit
     ? await cached.value
     : await (async () => {
@@ -1006,13 +1028,22 @@ async function handleSemanticScholarDoiMetadataRoute(context, event, principal, 
       }
 
       const timeout = AbortSignal.timeout(config.semanticScholarTimeoutMs);
-      return getCachedSemanticScholarResponse(cacheKey, () =>
-        fetchSemanticScholarDoiMetadata({
-          apiKey: config.semanticScholarApiKey,
-          doi,
-          signal: timeout,
-        })
-      );
+      return getCachedSemanticScholarResponse(cacheKey, () => {
+        if (!config.openalexApiKey) {
+          provider = "semantic_scholar";
+          return fetchSemanticScholarDoiMetadata({ apiKey: config.semanticScholarApiKey, doi, signal: timeout });
+        }
+
+        const openAlexTimeout = AbortSignal.timeout(config.openalexTimeoutMs);
+        return withProviderFallback({
+          primary: () => fetchOpenAlexDoiMetadata({ apiKey: config.openalexApiKey, doi, signal: openAlexTimeout }),
+          fallback: () => fetchSemanticScholarDoiMetadata({ apiKey: config.semanticScholarApiKey, doi, signal: timeout }),
+          isFallbackEligible: isOpenAlexFallbackEligible,
+          onProviderUsed: (usedProvider) => {
+            provider = usedProvider;
+          },
+        });
+      });
     })();
 
   if (metadata?.statusCode) {
@@ -1024,6 +1055,7 @@ async function handleSemanticScholarDoiMetadataRoute(context, event, principal, 
     meta: {
       request_id: context.requestId,
       doi,
+      provider,
     },
   });
 }

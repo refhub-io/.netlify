@@ -6,6 +6,34 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this
 project uses [Semantic Versioning](https://semver.org/). History prior to
 2.2.0 was not tracked in this file.
 
+## [2.3.0] - 2026-07-10
+
+### Added
+- OpenAlex integrated as the primary metadata/discovery provider for DOI
+  metadata, references, citations, and topic search, with automatic
+  fallback to Semantic Scholar on error, rate limit, or exhausted daily
+  budget. Every route keeps its existing request/response shape; only an
+  additive `meta.provider` field (`"openalex"` or `"semantic_scholar"`)
+  is new. Recommendations (batch seed papers -> related papers) continue
+  to use Semantic Scholar exclusively, since OpenAlex has no equivalent.
+- `src/openalex.js`: DOI-metadata, references, citations, and search
+  fetchers against the OpenAlex API, plus a daily-budget tracker
+  (`takeOpenAlexBudget`) that hard-stops OpenAlex usage at the configured
+  free daily budget rather than incurring real billing.
+- `src/providerFallback.js`: a small, provider-agnostic
+  `withProviderFallback({ primary, fallback, isFallbackEligible,
+  onProviderUsed })` helper used by every OpenAlex-backed route so the
+  primary/fallback logic isn't duplicated per route.
+- `openalex_budget_state` table and `take_openalex_budget` Postgres
+  function (see refhub.io's `supabase/migrations`), tracking cumulative
+  OpenAlex spend globally across all function instances and resetting at
+  UTC midnight, mirroring the existing Semantic Scholar rate-limit
+  tracker's design.
+- New environment variables: `OPENALEX_API_KEY`, `OPENALEX_DAILY_BUDGET_USD`,
+  `OPENALEX_TIMEOUT_MS`. When `OPENALEX_API_KEY` is unset, OpenAlex is
+  skipped entirely and every route behaves exactly as it did before this
+  change, using Semantic Scholar only.
+
 ## [2.2.0] - 2026-07-09
 
 ### Added

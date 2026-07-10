@@ -1,11 +1,11 @@
 {
   "name": "@refhub/api",
   "private": true,
-  "version": "2.2.0",
+  "version": "2.3.0",
   "type": "module",
   "description": "refhub netlify api",
   "scripts": {
-    "check": "node --check functions/api-v1.js && node --check src/auth.js && node --check src/config.js && node --check src/export.js && node --check src/google-drive.js && node --check src/http.js && node --check src/semantic-scholar.js",
+    "check": "node --check functions/api-v1.js && node --check src/auth.js && node --check src/config.js && node --check src/export.js && node --check src/google-drive.js && node --check src/http.js && node --check src/semantic-scholar.js && node --check src/openalex.js && node --check src/providerFallback.js",
     "test": "vitest run"
   },
   "dependencies": {

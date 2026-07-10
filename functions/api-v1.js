@@ -319,6 +319,16 @@ function isOpenAlexFallbackEligible(error) {
   return OPENALEX_FALLBACK_ELIGIBLE_CODES.has(error?.code);
 }
 
+const OPENALEX_FETCHERS_BY_ROUTE = {
+  references: fetchOpenAlexReferences,
+  citations: fetchOpenAlexCitations,
+};
+
+const OPENALEX_COST_BY_ROUTE = {
+  references: 0,
+  citations: OPENALEX_CITATIONS_COST_USD,
+};
+
 async function handleSemanticScholarPaperRoute(context, event, principal, supabase, routeName, fetcher) {
   const scopeError = ensureSemanticScholarReadScope(principal, context);
   if (scopeError) return scopeError;
@@ -335,6 +345,7 @@ async function handleSemanticScholarPaperRoute(context, event, principal, supaba
   const { seedPaperId, limit } = normalizedRequest.value;
   const cacheKey = `${routeName}:${seedPaperId}:${limit}`;
   const cached = getCachedSemanticScholarValue(cacheKey);
+  let provider = "cache";
   const papers = cached.hit
     ? await cached.value
     : await (async () => {
@@ -362,14 +373,38 @@ async function handleSemanticScholarPaperRoute(context, event, principal, supaba
       }
 
       const timeout = AbortSignal.timeout(config.semanticScholarTimeoutMs);
-      return getCachedSemanticScholarResponse(cacheKey, () =>
-        fetcher({
-          apiKey: config.semanticScholarApiKey,
-          seedPaperId,
-          limit,
-          signal: timeout,
-        })
-      );
+      const fetchFromSemanticScholar = () => {
+        provider = "semantic_scholar";
+        return fetcher({ apiKey: config.semanticScholarApiKey, seedPaperId, limit, signal: timeout });
+      };
+
+      return getCachedSemanticScholarResponse(cacheKey, async () => {
+        const openAlexFetcher = OPENALEX_FETCHERS_BY_ROUTE[routeName];
+        const doiMatch = /^DOI:(.+)$/i.exec(seedPaperId);
+
+        if (!openAlexFetcher || !config.openalexApiKey || !doiMatch) {
+          return fetchFromSemanticScholar();
+        }
+
+        const cost = OPENALEX_COST_BY_ROUTE[routeName] ?? 0;
+        if (cost > 0) {
+          const budget = await takeOpenAlexBudget(getSupabaseAdmin(), config, cost);
+          if (!budget.allowed) {
+            return fetchFromSemanticScholar();
+          }
+        }
+
+        const bareDoi = doiMatch[1];
+        const openAlexTimeout = AbortSignal.timeout(config.openalexTimeoutMs);
+        return withProviderFallback({
+          primary: () => openAlexFetcher({ apiKey: config.openalexApiKey, doi: bareDoi, limit, signal: openAlexTimeout }),
+          fallback: fetchFromSemanticScholar,
+          isFallbackEligible: isOpenAlexFallbackEligible,
+          onProviderUsed: (usedProvider) => {
+            provider = usedProvider;
+          },
+        });
+      });
     })();
 
   if (papers?.statusCode) {
@@ -382,6 +417,7 @@ async function handleSemanticScholarPaperRoute(context, event, principal, supaba
       request_id: context.requestId,
       paper_id: seedPaperId,
       limit,
+      provider,
     },
   });
 }

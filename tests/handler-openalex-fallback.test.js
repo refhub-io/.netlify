@@ -98,6 +98,7 @@ describe("doi-metadata route: OpenAlex primary, Semantic Scholar fallback", () =
 
     expect(res.statusCode).toBe(200);
     expect(JSON.parse(res.body).data.title).toBe("OpenAlex Paper");
+    expect(JSON.parse(res.body).meta.provider).toBe("openalex");
     expect(fetchSemanticScholarDoiMetadata).not.toHaveBeenCalled();
   });
 
@@ -117,6 +118,7 @@ describe("doi-metadata route: OpenAlex primary, Semantic Scholar fallback", () =
 
     expect(res.statusCode).toBe(200);
     expect(JSON.parse(res.body).data.title).toBe("SS Paper");
+    expect(JSON.parse(res.body).meta.provider).toBe("semantic_scholar");
     expect(fetchOpenAlexDoiMetadata).toHaveBeenCalledTimes(1);
     expect(fetchSemanticScholarDoiMetadata).toHaveBeenCalledTimes(1);
   });
@@ -134,6 +136,7 @@ describe("doi-metadata route: OpenAlex primary, Semantic Scholar fallback", () =
     const res = await handler(makeEvent("/api/v1/semantic-scholar/doi-metadata", { doi: "10.1/z" }));
 
     expect(res.statusCode).toBe(200);
+    expect(JSON.parse(res.body).meta.provider).toBe("semantic_scholar");
     expect(fetchOpenAlexDoiMetadata).not.toHaveBeenCalled();
     expect(fetchSemanticScholarDoiMetadata).toHaveBeenCalledTimes(1);
   });
@@ -168,6 +171,7 @@ describe("search route: OpenAlex primary (budget-gated), Semantic Scholar fallba
 
     expect(res.statusCode).toBe(200);
     expect(JSON.parse(res.body).data[0].paper_id).toBe("W1");
+    expect(JSON.parse(res.body).meta.provider).toBe("openalex");
     expect(fetchSemanticScholarSearch).not.toHaveBeenCalled();
     expect(takeOpenAlexBudget).toHaveBeenCalledWith(expect.anything(), expect.anything(), 0.001);
   });
@@ -180,6 +184,7 @@ describe("search route: OpenAlex primary (budget-gated), Semantic Scholar fallba
 
     expect(res.statusCode).toBe(200);
     expect(JSON.parse(res.body).data[0].paper_id).toBe("p1");
+    expect(JSON.parse(res.body).meta.provider).toBe("semantic_scholar");
     expect(fetchOpenAlexSearch).not.toHaveBeenCalled();
   });
 
@@ -193,6 +198,7 @@ describe("search route: OpenAlex primary (budget-gated), Semantic Scholar fallba
 
     expect(res.statusCode).toBe(200);
     expect(JSON.parse(res.body).data[0].paper_id).toBe("p2");
+    expect(JSON.parse(res.body).meta.provider).toBe("semantic_scholar");
   });
 });
 
@@ -224,6 +230,7 @@ describe("references/citations routes: DOI-prefixed paper_id triggers OpenAlex p
 
     expect(res.statusCode).toBe(200);
     expect(JSON.parse(res.body).data[0].paper_id).toBe("W1");
+    expect(JSON.parse(res.body).meta.provider).toBe("openalex");
     expect(fetchOpenAlexReferences).toHaveBeenCalledWith(
       expect.objectContaining({ doi: "10.1038/nature12373", limit: 10 }),
     );
@@ -242,6 +249,7 @@ describe("references/citations routes: DOI-prefixed paper_id triggers OpenAlex p
 
     expect(res.statusCode).toBe(200);
     expect(JSON.parse(res.body).data[0].paper_id).toBe("ss1");
+    expect(JSON.parse(res.body).meta.provider).toBe("semantic_scholar");
   });
 
   it("calls Semantic Scholar directly, never OpenAlex, for a non-DOI paper_id", async () => {
@@ -252,6 +260,7 @@ describe("references/citations routes: DOI-prefixed paper_id triggers OpenAlex p
     );
 
     expect(res.statusCode).toBe(200);
+    expect(JSON.parse(res.body).meta.provider).toBe("semantic_scholar");
     expect(fetchOpenAlexReferences).not.toHaveBeenCalled();
     expect(fetchSemanticScholarReferences).toHaveBeenCalledTimes(1);
   });
@@ -265,6 +274,7 @@ describe("references/citations routes: DOI-prefixed paper_id triggers OpenAlex p
     );
 
     expect(res.statusCode).toBe(200);
+    expect(JSON.parse(res.body).meta.provider).toBe("semantic_scholar");
     expect(fetchOpenAlexCitations).not.toHaveBeenCalled();
     expect(fetchSemanticScholarCitations).toHaveBeenCalledWith(
       expect.objectContaining({ seedPaperId: "DOI:10.1038/nature12373" }),
@@ -279,6 +289,7 @@ describe("references/citations routes: DOI-prefixed paper_id triggers OpenAlex p
     );
 
     expect(res.statusCode).toBe(200);
+    expect(JSON.parse(res.body).meta.provider).toBe("semantic_scholar");
     expect(fetchOpenAlexReferences).not.toHaveBeenCalled();
     expect(fetchOpenAlexCitations).not.toHaveBeenCalled();
     expect(fetchSemanticScholarRecommendations).toHaveBeenCalledTimes(1);

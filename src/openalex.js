@@ -164,6 +164,10 @@ export async function fetchOpenAlexReferences({ apiKey, doi, limit, signal }) {
     return [];
   }
 
+  // OR-filter values aren't chunked here because referencedIds.length is
+  // bounded by `limit`, which callers cap at MAX_PAPER_LIST_LIMIT (25, see
+  // src/semantic-scholar.js) -- well under OpenAlex's 100-value OR-filter
+  // cap. If MAX_PAPER_LIST_LIMIT is ever raised past 100, this needs chunking.
   const listUrl = withApiKey(new URL(`${OPENALEX_BASE_URL}/works`), apiKey);
   listUrl.searchParams.set("filter", `openalex_id:${referencedIds.join("|")}`);
   listUrl.searchParams.set("select", OPENALEX_HYDRATE_FIELDS.join(","));

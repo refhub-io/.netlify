@@ -140,6 +140,36 @@ describe("doi-metadata route: OpenAlex primary, Semantic Scholar fallback", () =
     expect(fetchOpenAlexDoiMetadata).not.toHaveBeenCalled();
     expect(fetchSemanticScholarDoiMetadata).toHaveBeenCalledTimes(1);
   });
+
+  it("serves via OpenAlex when SEMANTIC_SCHOLAR_API_KEY is unset", async () => {
+    delete process.env.SEMANTIC_SCHOLAR_API_KEY;
+    vi.mocked(fetchOpenAlexDoiMetadata).mockResolvedValue({
+      title: "OpenAlex Only",
+      authors: ["A"],
+      doi: "10.1/oa-only",
+      url: "https://doi.org/10.1/oa-only",
+      type: "article",
+    });
+
+    const res = await handler(makeEvent("/api/v1/semantic-scholar/doi-metadata", { doi: "10.1/oa-only" }));
+
+    expect(res.statusCode).toBe(200);
+    expect(JSON.parse(res.body).data.title).toBe("OpenAlex Only");
+    expect(JSON.parse(res.body).meta.provider).toBe("openalex");
+    expect(fetchSemanticScholarDoiMetadata).not.toHaveBeenCalled();
+  });
+
+  it("returns 503 semantic_scholar_disabled when neither provider is configured", async () => {
+    delete process.env.SEMANTIC_SCHOLAR_API_KEY;
+    delete process.env.OPENALEX_API_KEY;
+
+    const res = await handler(makeEvent("/api/v1/semantic-scholar/doi-metadata", { doi: "10.1/none" }));
+
+    expect(res.statusCode).toBe(503);
+    expect(JSON.parse(res.body).error.code).toBe("semantic_scholar_disabled");
+    expect(fetchOpenAlexDoiMetadata).not.toHaveBeenCalled();
+    expect(fetchSemanticScholarDoiMetadata).not.toHaveBeenCalled();
+  });
 });
 
 describe("search route: OpenAlex primary (budget-gated), Semantic Scholar fallback", () => {

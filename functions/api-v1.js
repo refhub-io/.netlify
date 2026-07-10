@@ -1035,11 +1035,12 @@ async function handleSemanticScholarDoiMetadataRoute(context, event, principal, 
     return errorResponse(403, "missing_scope", "Scope vaults:read is required", context.requestId);
   }
 
-  // Semantic Scholar is disabled when no API key is configured. Without a key
-  // the unauthenticated rate limit (1 req/s shared) is hit almost immediately.
-  // Set SEMANTIC_SCHOLAR_API_KEY in the environment to re-enable this route.
+  // This route is disabled only when neither provider is configured at all.
+  // SEMANTIC_SCHOLAR_API_KEY is not required on its own -- it just raises
+  // Semantic Scholar's rate limit above the shared unauthenticated 1 req/s;
+  // OPENALEX_API_KEY alone is enough to serve this route.
   const config = getConfig();
-  if (!config.semanticScholarApiKey) {
+  if (!config.semanticScholarApiKey && !config.openalexApiKey) {
     return errorResponse(503, "semantic_scholar_disabled", "Semantic Scholar metadata enrichment is not configured on this server.", context.requestId);
   }
 

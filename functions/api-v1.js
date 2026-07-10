@@ -915,6 +915,7 @@ async function handleSemanticScholarSearchRoute(context, event, principal, supab
   const { query, limit } = normalizedRequest.value;
   const cacheKey = `search:${query.toLowerCase()}:${limit}`;
   const cached = getCachedSemanticScholarValue(cacheKey);
+  let provider = "cache";
   const papers = cached.hit
     ? await cached.value
     : await (async () => {
@@ -942,15 +943,32 @@ async function handleSemanticScholarSearchRoute(context, event, principal, supab
       }
 
       const timeout = AbortSignal.timeout(config.semanticScholarTimeoutMs);
+      const fetchFromSemanticScholar = () => {
+        provider = "semantic_scholar";
+        return fetchSemanticScholarSearch({ apiKey: config.semanticScholarApiKey, query, limit, signal: timeout });
+      };
+
       try {
-        return await getCachedSemanticScholarResponse(cacheKey, () =>
-          fetchSemanticScholarSearch({
-            apiKey: config.semanticScholarApiKey,
-            query,
-            limit,
-            signal: timeout,
-          })
-        );
+        return await getCachedSemanticScholarResponse(cacheKey, async () => {
+          if (!config.openalexApiKey) {
+            return fetchFromSemanticScholar();
+          }
+
+          const budget = await takeOpenAlexBudget(getSupabaseAdmin(), config, OPENALEX_SEARCH_COST_USD);
+          if (!budget.allowed) {
+            return fetchFromSemanticScholar();
+          }
+
+          const openAlexTimeout = AbortSignal.timeout(config.openalexTimeoutMs);
+          return withProviderFallback({
+            primary: () => fetchOpenAlexSearch({ apiKey: config.openalexApiKey, query, limit, signal: openAlexTimeout }),
+            fallback: fetchFromSemanticScholar,
+            isFallbackEligible: isOpenAlexFallbackEligible,
+            onProviderUsed: (usedProvider) => {
+              provider = usedProvider;
+            },
+          });
+        });
       } catch (error) {
         const stale = getStaleSemanticScholarValue(cacheKey);
         if (error?.code === "semantic_scholar_rate_limited" && stale.hit) {
@@ -971,6 +989,7 @@ async function handleSemanticScholarSearchRoute(context, event, principal, supab
       request_id: context.requestId,
       query,
       limit,
+      provider,
     },
   });
 }

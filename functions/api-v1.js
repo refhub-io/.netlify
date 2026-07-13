@@ -362,7 +362,7 @@ async function handleSemanticScholarPaperRoute(context, event, principal, supaba
             {
               error: {
                 code: "rate_limit_exceeded",
-                message: "Too many Semantic Scholar requests; please retry shortly",
+                message: "Too many paper-metadata requests; please retry shortly",
                 details: {
                   retry_after_seconds: rateLimit.retryAfterSeconds,
                 },
@@ -976,7 +976,7 @@ async function handleSemanticScholarSearchRoute(context, event, principal, supab
             {
               error: {
                 code: "rate_limit_exceeded",
-                message: "Too many Semantic Scholar requests; please retry shortly",
+                message: "Too many paper-metadata requests; please retry shortly",
                 details: {
                   retry_after_seconds: rateLimit.retryAfterSeconds,
                 },
@@ -1088,7 +1088,7 @@ async function handleSemanticScholarDoiMetadataRoute(context, event, principal, 
             {
               error: {
                 code: "rate_limit_exceeded",
-                message: "Too many Semantic Scholar requests; please retry shortly",
+                message: "Too many paper-metadata requests; please retry shortly",
                 details: {
                   retry_after_seconds: rateLimit.retryAfterSeconds,
                 },

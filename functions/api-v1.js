@@ -320,6 +320,22 @@ function isOpenAlexFallbackEligible(error) {
   return OPENALEX_FALLBACK_ELIGIBLE_CODES.has(error?.code);
 }
 
+// take_openalex_budget can throw for reasons unrelated to the budget itself
+// (RPC missing because the migration hasn't been applied yet, a transient
+// Postgres error, etc.). None of those should turn into a 500 -- they should
+// no-op back to Semantic-Scholar-only, same as a real "budget exceeded".
+async function takeOpenAlexBudgetOrFallback(config, cost) {
+  try {
+    return await takeOpenAlexBudget(getSupabaseAdmin(), config, cost);
+  } catch (error) {
+    console.error("OpenAlex budget check failed; falling back to Semantic Scholar", {
+      code: error?.code,
+      message: error?.message,
+    });
+    return { allowed: false, spentUsd: null };
+  }
+}
+
 const OPENALEX_FETCHERS_BY_ROUTE = {
   references: fetchOpenAlexReferences,
   citations: fetchOpenAlexCitations,
@@ -393,7 +409,7 @@ async function handleSemanticScholarPaperRoute(context, event, principal, supaba
 
         const cost = OPENALEX_COST_BY_ROUTE[routeName] ?? 0;
         if (cost > 0) {
-          const budget = await takeOpenAlexBudget(getSupabaseAdmin(), config, cost);
+          const budget = await takeOpenAlexBudgetOrFallback(config, cost);
           if (!budget.allowed) {
             return { value: await fetchFromSemanticScholar(), provider: "semantic_scholar" };
           }
@@ -1003,7 +1019,7 @@ async function handleSemanticScholarSearchRoute(context, event, principal, supab
             return { value: await fetchFromSemanticScholar(), provider: "semantic_scholar" };
           }
 
-          const budget = await takeOpenAlexBudget(getSupabaseAdmin(), config, OPENALEX_SEARCH_COST_USD);
+          const budget = await takeOpenAlexBudgetOrFallback(config, OPENALEX_SEARCH_COST_USD);
           if (!budget.allowed) {
             return { value: await fetchFromSemanticScholar(), provider: "semantic_scholar" };
           }

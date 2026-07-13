@@ -276,6 +276,18 @@ describe("search route: OpenAlex primary (budget-gated), Semantic Scholar fallba
     expect(JSON.parse(res.body).data[0].paper_id).toBe("p2");
     expect(JSON.parse(res.body).meta.provider).toBe("semantic_scholar");
   });
+
+  it("falls back to Semantic Scholar instead of a 500 when the budget RPC itself throws", async () => {
+    vi.mocked(takeOpenAlexBudget).mockRejectedValue(new Error("relation take_openalex_budget does not exist"));
+    vi.mocked(fetchSemanticScholarSearch).mockResolvedValue([{ paper_id: "p3", title: "SS Result" }]);
+
+    const res = await handler(makeEvent("/api/v1/semantic-scholar/search", { query: "budget rpc missing" }));
+
+    expect(res.statusCode).toBe(200);
+    expect(JSON.parse(res.body).data[0].paper_id).toBe("p3");
+    expect(JSON.parse(res.body).meta.provider).toBe("semantic_scholar");
+    expect(fetchOpenAlexSearch).not.toHaveBeenCalled();
+  });
 });
 
 describe("references/citations routes: DOI-prefixed paper_id triggers OpenAlex primary", () => {
@@ -355,6 +367,19 @@ describe("references/citations routes: DOI-prefixed paper_id triggers OpenAlex p
     expect(fetchSemanticScholarCitations).toHaveBeenCalledWith(
       expect.objectContaining({ seedPaperId: "DOI:10.1038/nature12373" }),
     );
+  });
+
+  it("falls back to Semantic Scholar citations instead of a 500 when the budget RPC itself throws", async () => {
+    vi.mocked(takeOpenAlexBudget).mockRejectedValue(new Error("relation take_openalex_budget does not exist"));
+    vi.mocked(fetchSemanticScholarCitations).mockResolvedValue([{ paper_id: "ss4", title: "SS Citation" }]);
+
+    const res = await handler(
+      makeEvent("/api/v1/semantic-scholar/citations", { paper_id: "DOI:10.1038/nature12373", limit: 10 }),
+    );
+
+    expect(res.statusCode).toBe(200);
+    expect(JSON.parse(res.body).meta.provider).toBe("semantic_scholar");
+    expect(fetchOpenAlexCitations).not.toHaveBeenCalled();
   });
 
   it("never calls OpenAlex for recommendations, even with a DOI:-prefixed seed", async () => {

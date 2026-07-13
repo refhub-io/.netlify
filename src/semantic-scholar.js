@@ -36,9 +36,18 @@ export async function takeSemanticScholarRateLimit(supabase, config) {
   }
 
   const row = Array.isArray(data) ? data[0] : data;
+  if (!row || typeof row.allowed !== "boolean") {
+    // A missing/malformed row means the RPC contract was violated (e.g. no
+    // rows returned). Without this check, `Boolean(row?.allowed)` would
+    // silently coerce that into `{allowed: false, retryAfterSeconds: null}`
+    // -- a fake rate-limit-exceeded response with a garbage Retry-After --
+    // instead of surfacing the real problem.
+    throw new Error("take_semantic_scholar_rate_limit returned an unexpected response shape");
+  }
+
   return {
-    allowed: Boolean(row?.allowed),
-    retryAfterSeconds: row?.allowed ? null : row?.retry_after_seconds ?? null,
+    allowed: row.allowed,
+    retryAfterSeconds: row.allowed ? null : row.retry_after_seconds ?? null,
   };
 }
 

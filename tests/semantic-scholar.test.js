@@ -74,6 +74,26 @@ describe("takeSemanticScholarRateLimit", () => {
 
     await expect(takeSemanticScholarRateLimit(supabase, config)).rejects.toThrow("connection refused");
   });
+
+  it("throws if the RPC succeeds but returns no usable row, instead of a fake denial", async () => {
+    const supabase = {
+      rpc: vi.fn().mockResolvedValue({ data: [], error: null }),
+    };
+
+    await expect(takeSemanticScholarRateLimit(supabase, config)).rejects.toThrow(
+      "unexpected response shape",
+    );
+  });
+
+  it("throws if the RPC returns a row without a boolean allowed field", async () => {
+    const supabase = {
+      rpc: vi.fn().mockResolvedValue({ data: [{ retry_after_seconds: 5 }], error: null }),
+    };
+
+    await expect(takeSemanticScholarRateLimit(supabase, config)).rejects.toThrow(
+      "unexpected response shape",
+    );
+  });
 });
 
 describe("semantic-scholar upstream errors", () => {

@@ -85,6 +85,23 @@ describe("doi-metadata route: OpenAlex primary, Semantic Scholar fallback", () =
     });
   });
 
+  it("reports the true originating provider on a cache hit, not \"cache\"", async () => {
+    vi.mocked(fetchOpenAlexDoiMetadata).mockResolvedValue({
+      title: "OpenAlex Cached Paper",
+      authors: ["A"],
+      doi: "10.1/cache-hit",
+      url: "https://doi.org/10.1/cache-hit",
+      type: "article",
+    });
+
+    const first = await handler(makeEvent("/api/v1/semantic-scholar/doi-metadata", { doi: "10.1/cache-hit" }));
+    const second = await handler(makeEvent("/api/v1/semantic-scholar/doi-metadata", { doi: "10.1/cache-hit" }));
+
+    expect(JSON.parse(first.body).meta.provider).toBe("openalex");
+    expect(JSON.parse(second.body).meta.provider).toBe("openalex");
+    expect(fetchOpenAlexDoiMetadata).toHaveBeenCalledTimes(1);
+  });
+
   it("uses OpenAlex when it succeeds, never calling Semantic Scholar", async () => {
     vi.mocked(fetchOpenAlexDoiMetadata).mockResolvedValue({
       title: "OpenAlex Paper",

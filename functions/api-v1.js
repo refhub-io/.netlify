@@ -157,6 +157,13 @@ const VAULT_PUBLICATION_SELECT = [
 const SEMANTIC_SCHOLAR_CACHE_TTL_MS = 60 * 1000;
 const SEMANTIC_SCHOLAR_CACHE_STALE_TTL_MS = 10 * 60 * 1000;
 const semanticScholarResponseCache = new Map();
+// Tracks which provider (openalex/semantic_scholar) actually produced the
+// value stored under a given cache key, so a later cache hit can report the
+// true originating provider in meta.provider instead of the opaque "cache".
+// Kept separate from semanticScholarResponseCache so the shared cache's
+// value shape stays untouched for callers (e.g. recommendations) that never
+// set a provider at all.
+const semanticScholarCacheProviderByKey = new Map();
 
 function getSafeCorsHeaders(event) {
   try {
@@ -235,6 +242,28 @@ function pruneSemanticScholarState(now = Date.now()) {
       semanticScholarResponseCache.delete(key);
     }
   }
+
+  for (const [key, entry] of semanticScholarCacheProviderByKey.entries()) {
+    if (entry.expiresAt <= now) {
+      semanticScholarCacheProviderByKey.delete(key);
+    }
+  }
+}
+
+function rememberSemanticScholarCacheProvider(cacheKey, provider, now = Date.now()) {
+  semanticScholarCacheProviderByKey.set(cacheKey, {
+    provider,
+    expiresAt: now + SEMANTIC_SCHOLAR_CACHE_STALE_TTL_MS,
+  });
+}
+
+function recallSemanticScholarCacheProvider(cacheKey, now = Date.now()) {
+  const entry = semanticScholarCacheProviderByKey.get(cacheKey);
+  if (!entry || entry.expiresAt <= now) {
+    return null;
+  }
+
+  return entry.provider;
 }
 
 function getCachedSemanticScholarValue(cacheKey, now = Date.now()) {
@@ -345,7 +374,7 @@ async function handleSemanticScholarPaperRoute(context, event, principal, supaba
   const { seedPaperId, limit } = normalizedRequest.value;
   const cacheKey = `${routeName}:${seedPaperId}:${limit}`;
   const cached = getCachedSemanticScholarValue(cacheKey);
-  let provider = "cache";
+  let provider = cached.hit ? recallSemanticScholarCacheProvider(cacheKey) || "cache" : "cache";
   const papers = cached.hit
     ? await cached.value
     : await (async () => {
@@ -409,6 +438,10 @@ async function handleSemanticScholarPaperRoute(context, event, principal, supaba
 
   if (papers?.statusCode) {
     return papers;
+  }
+
+  if (!cached.hit) {
+    rememberSemanticScholarCacheProvider(cacheKey, provider);
   }
 
   return json(200, {
@@ -951,7 +984,7 @@ async function handleSemanticScholarSearchRoute(context, event, principal, supab
   const { query, limit } = normalizedRequest.value;
   const cacheKey = `search:${query.toLowerCase()}:${limit}`;
   const cached = getCachedSemanticScholarValue(cacheKey);
-  let provider = "cache";
+  let provider = cached.hit ? recallSemanticScholarCacheProvider(cacheKey) || "cache" : "cache";
   const papers = cached.hit
     ? await cached.value
     : await (async () => {
@@ -1008,6 +1041,10 @@ async function handleSemanticScholarSearchRoute(context, event, principal, supab
       } catch (error) {
         const stale = getStaleSemanticScholarValue(cacheKey);
         if (error?.code === "semantic_scholar_rate_limited" && stale.hit) {
+          // provider was provisionally set to "semantic_scholar" by
+          // fetchFromSemanticScholar before it threw; prefer whatever
+          // provider actually produced this stale value if we recorded one.
+          provider = recallSemanticScholarCacheProvider(cacheKey) || provider;
           return stale.value;
         }
 
@@ -1017,6 +1054,10 @@ async function handleSemanticScholarSearchRoute(context, event, principal, supab
 
   if (papers?.statusCode) {
     return papers;
+  }
+
+  if (!cached.hit) {
+    rememberSemanticScholarCacheProvider(cacheKey, provider);
   }
 
   return json(200, {
@@ -1057,7 +1098,7 @@ async function handleSemanticScholarDoiMetadataRoute(context, event, principal, 
   const { doi } = normalizedRequest.value;
   const cacheKey = `doi-metadata:${doi}`;
   const cached = getCachedSemanticScholarValue(cacheKey);
-  let provider = "cache";
+  let provider = cached.hit ? recallSemanticScholarCacheProvider(cacheKey) || "cache" : "cache";
   const metadata = cached.hit
     ? await cached.value
     : await (async () => {
@@ -1104,6 +1145,10 @@ async function handleSemanticScholarDoiMetadataRoute(context, event, principal, 
 
   if (metadata?.statusCode) {
     return metadata;
+  }
+
+  if (!cached.hit) {
+    rememberSemanticScholarCacheProvider(cacheKey, provider);
   }
 
   return json(200, {

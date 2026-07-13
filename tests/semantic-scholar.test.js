@@ -67,6 +67,26 @@ describe("takeSemanticScholarRateLimit", () => {
     expect(result).toEqual({ allowed: false, retryAfterSeconds: 17 });
   });
 
+  it("falls back to the rate-limit window when retry_after_seconds is missing", async () => {
+    const supabase = {
+      rpc: vi.fn().mockResolvedValue({ data: [{ allowed: false }], error: null }),
+    };
+
+    const result = await takeSemanticScholarRateLimit(supabase, config);
+
+    expect(result).toEqual({ allowed: false, retryAfterSeconds: 60 });
+  });
+
+  it("falls back to the rate-limit window when retry_after_seconds is not numeric", async () => {
+    const supabase = {
+      rpc: vi.fn().mockResolvedValue({ data: [{ allowed: false, retry_after_seconds: "not-a-number" }], error: null }),
+    };
+
+    const result = await takeSemanticScholarRateLimit(supabase, config);
+
+    expect(result).toEqual({ allowed: false, retryAfterSeconds: 60 });
+  });
+
   it("throws if the RPC call itself fails", async () => {
     const supabase = {
       rpc: vi.fn().mockResolvedValue({ data: null, error: new Error("connection refused") }),

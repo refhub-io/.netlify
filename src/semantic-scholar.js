@@ -47,8 +47,22 @@ export async function takeSemanticScholarRateLimit(supabase, config) {
 
   return {
     allowed: row.allowed,
-    retryAfterSeconds: row.allowed ? null : row.retry_after_seconds ?? null,
+    retryAfterSeconds: row.allowed ? null : normalizeRetryAfterSeconds(row.retry_after_seconds, config),
   };
+}
+
+// Callers stringify retryAfterSeconds straight into a Retry-After header, so
+// a missing/non-numeric retry_after_seconds from the RPC (allowed is still a
+// valid boolean, just this field is off) must never surface as the literal
+// string "null" -- fall back to the full rate-limit window as a safe,
+// conservative retry hint instead.
+function normalizeRetryAfterSeconds(value, config) {
+  const numeric = Number(value);
+  if (Number.isFinite(numeric) && numeric >= 0) {
+    return Math.ceil(numeric);
+  }
+
+  return Math.max(1, Math.ceil(config.semanticScholarRateLimitWindowMs / 1000));
 }
 
 function createSemanticScholarError(code, message, status, details = undefined) {

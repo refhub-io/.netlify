@@ -42,6 +42,18 @@ async function requestOpenAlex(url, init = {}) {
   }
 }
 
+async function parseOpenAlexJson(response) {
+  try {
+    return await response.json();
+  } catch {
+    // A JSON.parse failure here (e.g. malformed/truncated body) has no
+    // openalex_* code, so isOpenAlexFallbackEligible would treat it as
+    // ineligible and skip the Semantic Scholar fallback entirely. Wrap it so
+    // fallback keeps working even when OpenAlex returns a broken body.
+    throw createOpenAlexError("openalex_error", "OpenAlex response could not be parsed", 502);
+  }
+}
+
 function assertSuccessfulOpenAlexResponse(response, notFoundError) {
   if (response.status === 404 && notFoundError) {
     throw createOpenAlexError(
@@ -123,7 +135,7 @@ export async function fetchOpenAlexDoiMetadata({ apiKey, doi, signal }) {
     status: 404,
   });
 
-  const work = await response.json();
+  const work = await parseOpenAlexJson(response);
   const authors = Array.isArray(work.authorships)
     ? work.authorships.map((a) => a.author?.display_name || "Unknown Author")
     : [];
@@ -155,7 +167,7 @@ export async function fetchOpenAlexReferences({ apiKey, doi, limit, signal }) {
     status: 404,
   });
 
-  const work = await workResponse.json();
+  const work = await parseOpenAlexJson(workResponse);
   const referencedIds = Array.isArray(work.referenced_works)
     ? work.referenced_works.slice(0, limit).map(stripOpenAlexIdPrefix)
     : [];
@@ -184,7 +196,7 @@ export async function fetchOpenAlexReferences({ apiKey, doi, limit, signal }) {
     status: 502,
   });
 
-  const payload = await listResponse.json();
+  const payload = await parseOpenAlexJson(listResponse);
   const results = Array.isArray(payload.results) ? payload.results : [];
   return results.map(normalizePaperFromWork).slice(0, limit);
 }
@@ -202,7 +214,7 @@ export async function fetchOpenAlexCitations({ apiKey, doi, limit, signal }) {
     status: 404,
   });
 
-  const work = await workResponse.json();
+  const work = await parseOpenAlexJson(workResponse);
   const workId = stripOpenAlexIdPrefix(work.id);
 
   const listUrl = withApiKey(new URL(`${OPENALEX_BASE_URL}/works`), apiKey);
@@ -221,7 +233,7 @@ export async function fetchOpenAlexCitations({ apiKey, doi, limit, signal }) {
     status: 502,
   });
 
-  const payload = await listResponse.json();
+  const payload = await parseOpenAlexJson(listResponse);
   const results = Array.isArray(payload.results) ? payload.results : [];
   return results.map(normalizePaperFromWork);
 }
@@ -245,7 +257,7 @@ export async function fetchOpenAlexSearch({ apiKey, query, limit, signal }) {
     status: 502,
   });
 
-  const payload = await response.json();
+  const payload = await parseOpenAlexJson(response);
   const results = Array.isArray(payload.results) ? payload.results : [];
   return results.map(normalizePaperFromWork);
 }

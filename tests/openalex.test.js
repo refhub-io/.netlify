@@ -145,6 +145,14 @@ describe("fetchOpenAlexDoiMetadata", () => {
     const [calledUrl] = vi.mocked(fetch).mock.calls[0];
     expect(String(calledUrl)).not.toContain("api_key");
   });
+
+  it("throws a fallback-eligible openalex_error when the response body isn't valid JSON", async () => {
+    vi.mocked(fetch).mockResolvedValue(new Response("not json", { status: 200 }));
+
+    await expect(
+      fetchOpenAlexDoiMetadata({ apiKey: "test-key", doi: "10.1/broken", signal: undefined }),
+    ).rejects.toMatchObject({ code: "openalex_error", status: 502 });
+  });
 });
 
 describe("fetchOpenAlexReferences", () => {

@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("../src/auth.js", async (importOriginal) => {
   const actual = await importOriginal();
@@ -394,5 +394,70 @@ describe("references/citations routes: DOI-prefixed paper_id triggers OpenAlex p
     expect(fetchOpenAlexReferences).not.toHaveBeenCalled();
     expect(fetchOpenAlexCitations).not.toHaveBeenCalled();
     expect(fetchSemanticScholarRecommendations).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("global Semantic Scholar rate limit only gates the SS-serving path", () => {
+  // take_semantic_scholar_rate_limit protects the shared SEMANTIC_SCHOLAR_API_KEY
+  // specifically. It must not block a request that OpenAlex can serve entirely on
+  // its own -- that would undermine the whole point of OpenAlex being the
+  // higher-capacity primary provider. Exhaustion is simulated directly via the
+  // mocked RPC result (rather than accumulating real state across two calls)
+  // since the limiter is now the global, Postgres-RPC-backed one shared across
+  // all requests -- there's no longer a real per-test in-memory bucket to warm up.
+  const exhaustedRpcResults = {
+    take_semantic_scholar_rate_limit: { data: [{ allowed: false, retry_after_seconds: 5 }], error: null },
+  };
+
+  beforeEach(() => {
+    process.env.SUPABASE_URL = "http://localhost";
+    process.env.SUPABASE_SERVICE_ROLE_KEY = "test";
+    process.env.REFHUB_API_KEY_PEPPER = "test";
+    process.env.SEMANTIC_SCHOLAR_API_KEY = "ss-test";
+    process.env.OPENALEX_API_KEY = "oa-test";
+    process.env.REFHUB_API_AUDIT_DISABLED = "true";
+    vi.mocked(authenticateManagementUser).mockReset();
+    vi.mocked(authenticateApiKey).mockReset();
+    vi.mocked(fetchSemanticScholarReferences).mockReset();
+    vi.mocked(fetchOpenAlexReferences).mockReset();
+  });
+
+  it("still serves via OpenAlex even when the global SS bucket is exhausted", async () => {
+    const principal = makeApiKeyPrincipal({ scopes: ["vaults:read"], userId: "rate-limit-precedence-user-1" });
+    vi.mocked(authenticateApiKey).mockResolvedValue({
+      supabase: makeMockSupabase({}, exhaustedRpcResults),
+      principal,
+    });
+
+    // A DOI-prefixed (OpenAlex-eligible) request should still succeed via
+    // OpenAlex even though the global SS bucket is exhausted, since it never
+    // touches the SS rate limit at all.
+    vi.mocked(fetchOpenAlexReferences).mockResolvedValue([{ paper_id: "W1", title: "OA Ref" }]);
+    const res = await handler(
+      makeEvent("/api/v1/semantic-scholar/references", { paper_id: "DOI:10.1038/rate-limit-precedence", limit: 10 }),
+    );
+
+    expect(res.statusCode).toBe(200);
+    expect(JSON.parse(res.body).meta.provider).toBe("openalex");
+    expect(fetchSemanticScholarReferences).not.toHaveBeenCalled();
+  });
+
+  it("still returns 429 with a real Retry-After once the SS bucket is exhausted and OpenAlex isn't eligible", async () => {
+    delete process.env.OPENALEX_API_KEY;
+    const principal = makeApiKeyPrincipal({ scopes: ["vaults:read"], userId: "rate-limit-precedence-user-2" });
+    vi.mocked(authenticateApiKey).mockResolvedValue({
+      supabase: makeMockSupabase({}, exhaustedRpcResults),
+      principal,
+    });
+
+    const res = await handler(
+      makeEvent("/api/v1/semantic-scholar/references", { paper_id: "some-seed-no-openalex", limit: 10 }),
+    );
+
+    expect(res.statusCode).toBe(429);
+    expect(JSON.parse(res.body).error.code).toBe("rate_limit_exceeded");
+    expect(res.headers["retry-after"]).not.toBe("null");
+    expect(Number(res.headers["retry-after"])).toBeGreaterThan(0);
+    expect(fetchSemanticScholarReferences).not.toHaveBeenCalled();
   });
 });

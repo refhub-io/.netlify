@@ -238,6 +238,43 @@ function pruneSemanticScholarState(now = Date.now()) {
 
 }
 
+// This gate protects the shared SEMANTIC_SCHOLAR_API_KEY specifically, so it
+// must only fire on code paths that actually call Semantic Scholar -- not on
+// every request to a route that OpenAlex could serve entirely on its own.
+// Callers throw this from inside their fetchFromSemanticScholar closure
+// (called lazily, only when SS is really about to be hit) rather than
+// checking it upfront, so an exhausted SS bucket never blocks an
+// OpenAlex-servable request. The code is deliberately distinct from the
+// upstream "semantic_scholar_rate_limited" (SS's own 429) so the two are
+// never confused by callers like the search route's stale-value fallback.
+function createLocalPaperRateLimitError(retryAfterSeconds) {
+  const error = new Error("Too many paper-metadata requests; please retry shortly");
+  error.code = "local_paper_rate_limited";
+  error.retryAfterSeconds = retryAfterSeconds;
+  return error;
+}
+
+function buildLocalPaperRateLimitResponse(error, requestId) {
+  return json(
+    429,
+    {
+      error: {
+        code: "rate_limit_exceeded",
+        message: error.message,
+        details: {
+          retry_after_seconds: error.retryAfterSeconds,
+        },
+      },
+      meta: {
+        request_id: requestId,
+      },
+    },
+    {
+      "retry-after": String(error.retryAfterSeconds),
+    },
+  );
+}
+
 function getCachedSemanticScholarValue(cacheKey, now = Date.now()) {
   pruneSemanticScholarState(now);
 
@@ -370,64 +407,51 @@ async function handleSemanticScholarPaperRoute(context, event, principal, supaba
     ? await cached.value
     : await (async () => {
       const config = getConfig();
-      const rateLimit = await takeSemanticScholarRateLimit(supabase, config);
-      if (!rateLimit.allowed) {
-        return {
-          value: json(
-            429,
-            {
-              error: {
-                code: "rate_limit_exceeded",
-                message: "Too many paper-metadata requests; please retry shortly",
-                details: {
-                  retry_after_seconds: rateLimit.retryAfterSeconds,
-                },
-              },
-              meta: {
-                request_id: context.requestId,
-              },
-            },
-            {
-              "retry-after": String(rateLimit.retryAfterSeconds),
-            },
-          ),
-          provider: null,
-        };
-      }
-
       const timeout = AbortSignal.timeout(config.semanticScholarTimeoutMs);
-      const fetchFromSemanticScholar = () =>
-        fetcher({ apiKey: config.semanticScholarApiKey, seedPaperId, limit, signal: timeout });
-
-      return getCachedSemanticScholarResponse(cacheKey, async () => {
-        const openAlexFetcher = OPENALEX_FETCHERS_BY_ROUTE[routeName];
-        const doiMatch = /^DOI:(.+)$/i.exec(seedPaperId);
-
-        if (!openAlexFetcher || !config.openalexApiKey || !doiMatch) {
-          return { value: await fetchFromSemanticScholar(), provider: "semantic_scholar" };
+      const fetchFromSemanticScholar = async () => {
+        const rateLimit = await takeSemanticScholarRateLimit(supabase, config);
+        if (!rateLimit.allowed) {
+          throw createLocalPaperRateLimitError(rateLimit.retryAfterSeconds);
         }
+        return fetcher({ apiKey: config.semanticScholarApiKey, seedPaperId, limit, signal: timeout });
+      };
 
-        const cost = OPENALEX_COST_BY_ROUTE[routeName] ?? 0;
-        if (cost > 0) {
-          const budget = await takeOpenAlexBudgetOrFallback(config, cost);
-          if (!budget.allowed) {
+      try {
+        return await getCachedSemanticScholarResponse(cacheKey, async () => {
+          const openAlexFetcher = OPENALEX_FETCHERS_BY_ROUTE[routeName];
+          const doiMatch = /^DOI:(.+)$/i.exec(seedPaperId);
+
+          if (!openAlexFetcher || !config.openalexApiKey || !doiMatch) {
             return { value: await fetchFromSemanticScholar(), provider: "semantic_scholar" };
           }
-        }
 
-        const bareDoi = doiMatch[1];
-        const openAlexTimeout = AbortSignal.timeout(config.openalexTimeoutMs);
-        let provider;
-        const value = await withProviderFallback({
-          primary: () => openAlexFetcher({ apiKey: config.openalexApiKey, doi: bareDoi, limit, signal: openAlexTimeout }),
-          fallback: fetchFromSemanticScholar,
-          isFallbackEligible: isOpenAlexFallbackEligible,
-          onProviderUsed: (usedProvider) => {
-            provider = usedProvider;
-          },
+          const cost = OPENALEX_COST_BY_ROUTE[routeName] ?? 0;
+          if (cost > 0) {
+            const budget = await takeOpenAlexBudgetOrFallback(config, cost);
+            if (!budget.allowed) {
+              return { value: await fetchFromSemanticScholar(), provider: "semantic_scholar" };
+            }
+          }
+
+          const bareDoi = doiMatch[1];
+          const openAlexTimeout = AbortSignal.timeout(config.openalexTimeoutMs);
+          let provider;
+          const value = await withProviderFallback({
+            primary: () => openAlexFetcher({ apiKey: config.openalexApiKey, doi: bareDoi, limit, signal: openAlexTimeout }),
+            fallback: fetchFromSemanticScholar,
+            isFallbackEligible: isOpenAlexFallbackEligible,
+            onProviderUsed: (usedProvider) => {
+              provider = usedProvider;
+            },
+          });
+          return { value, provider };
         });
-        return { value, provider };
-      });
+      } catch (error) {
+        if (error?.code === "local_paper_rate_limited") {
+          return { value: buildLocalPaperRateLimitResponse(error, context.requestId), provider: null };
+        }
+        throw error;
+      }
     })();
 
   const { value: papers, provider } = outcome;
@@ -984,34 +1008,14 @@ async function handleSemanticScholarSearchRoute(context, event, principal, supab
     ? await cached.value
     : await (async () => {
       const config = getConfig();
-      const rateLimit = await takeSemanticScholarRateLimit(supabase, config);
-      if (!rateLimit.allowed) {
-        return {
-          value: json(
-            429,
-            {
-              error: {
-                code: "rate_limit_exceeded",
-                message: "Too many paper-metadata requests; please retry shortly",
-                details: {
-                  retry_after_seconds: rateLimit.retryAfterSeconds,
-                },
-              },
-              meta: {
-                request_id: context.requestId,
-              },
-            },
-            {
-              "retry-after": String(rateLimit.retryAfterSeconds),
-            },
-          ),
-          provider: null,
-        };
-      }
-
       const timeout = AbortSignal.timeout(config.semanticScholarTimeoutMs);
-      const fetchFromSemanticScholar = () =>
-        fetchSemanticScholarSearch({ apiKey: config.semanticScholarApiKey, query, limit, signal: timeout });
+      const fetchFromSemanticScholar = async () => {
+        const rateLimit = await takeSemanticScholarRateLimit(supabase, config);
+        if (!rateLimit.allowed) {
+          throw createLocalPaperRateLimitError(rateLimit.retryAfterSeconds);
+        }
+        return fetchSemanticScholarSearch({ apiKey: config.semanticScholarApiKey, query, limit, signal: timeout });
+      };
 
       try {
         return await getCachedSemanticScholarResponse(cacheKey, async () => {
@@ -1037,6 +1041,10 @@ async function handleSemanticScholarSearchRoute(context, event, principal, supab
           return { value, provider };
         });
       } catch (error) {
+        if (error?.code === "local_paper_rate_limited") {
+          return { value: buildLocalPaperRateLimitResponse(error, context.requestId), provider: null };
+        }
+
         const stale = getStaleSemanticScholarValue(cacheKey);
         if (error?.code === "semantic_scholar_rate_limited" && stale.hit) {
           return stale.value;
@@ -1096,52 +1104,39 @@ async function handleSemanticScholarDoiMetadataRoute(context, event, principal, 
   const outcome = cached.hit
     ? await cached.value
     : await (async () => {
-      const rateLimit = await takeSemanticScholarRateLimit(supabase, config);
-      if (!rateLimit.allowed) {
-        return {
-          value: json(
-            429,
-            {
-              error: {
-                code: "rate_limit_exceeded",
-                message: "Too many paper-metadata requests; please retry shortly",
-                details: {
-                  retry_after_seconds: rateLimit.retryAfterSeconds,
-                },
-              },
-              meta: {
-                request_id: context.requestId,
-              },
-            },
-            {
-              "retry-after": String(rateLimit.retryAfterSeconds),
-            },
-          ),
-          provider: null,
-        };
-      }
-
       const timeout = AbortSignal.timeout(config.semanticScholarTimeoutMs);
-      return getCachedSemanticScholarResponse(cacheKey, async () => {
-        if (!config.openalexApiKey) {
-          return {
-            value: await fetchSemanticScholarDoiMetadata({ apiKey: config.semanticScholarApiKey, doi, signal: timeout }),
-            provider: "semantic_scholar",
-          };
+      const fetchFromSemanticScholar = async () => {
+        const rateLimit = await takeSemanticScholarRateLimit(supabase, config);
+        if (!rateLimit.allowed) {
+          throw createLocalPaperRateLimitError(rateLimit.retryAfterSeconds);
         }
+        return fetchSemanticScholarDoiMetadata({ apiKey: config.semanticScholarApiKey, doi, signal: timeout });
+      };
 
-        const openAlexTimeout = AbortSignal.timeout(config.openalexTimeoutMs);
-        let provider;
-        const value = await withProviderFallback({
-          primary: () => fetchOpenAlexDoiMetadata({ apiKey: config.openalexApiKey, doi, signal: openAlexTimeout }),
-          fallback: () => fetchSemanticScholarDoiMetadata({ apiKey: config.semanticScholarApiKey, doi, signal: timeout }),
-          isFallbackEligible: isOpenAlexFallbackEligible,
-          onProviderUsed: (usedProvider) => {
-            provider = usedProvider;
-          },
+      try {
+        return await getCachedSemanticScholarResponse(cacheKey, async () => {
+          if (!config.openalexApiKey) {
+            return { value: await fetchFromSemanticScholar(), provider: "semantic_scholar" };
+          }
+
+          const openAlexTimeout = AbortSignal.timeout(config.openalexTimeoutMs);
+          let provider;
+          const value = await withProviderFallback({
+            primary: () => fetchOpenAlexDoiMetadata({ apiKey: config.openalexApiKey, doi, signal: openAlexTimeout }),
+            fallback: fetchFromSemanticScholar,
+            isFallbackEligible: isOpenAlexFallbackEligible,
+            onProviderUsed: (usedProvider) => {
+              provider = usedProvider;
+            },
+          });
+          return { value, provider };
         });
-        return { value, provider };
-      });
+      } catch (error) {
+        if (error?.code === "local_paper_rate_limited") {
+          return { value: buildLocalPaperRateLimitResponse(error, context.requestId), provider: null };
+        }
+        throw error;
+      }
     })();
 
   const { value: metadata, provider } = outcome;

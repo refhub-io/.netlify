@@ -102,6 +102,35 @@ describe("doi-metadata route: OpenAlex primary, Semantic Scholar fallback", () =
     expect(fetchOpenAlexDoiMetadata).toHaveBeenCalledTimes(1);
   });
 
+  it("reports the true provider for a request that joins an in-flight fetch, not \"cache\"", async () => {
+    let resolveFetch;
+    vi.mocked(fetchOpenAlexDoiMetadata).mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveFetch = () =>
+            resolve({
+              title: "OpenAlex In-Flight Paper",
+              authors: ["A"],
+              doi: "10.1/in-flight",
+              url: "https://doi.org/10.1/in-flight",
+              type: "article",
+            });
+        }),
+    );
+
+    const firstPromise = handler(makeEvent("/api/v1/semantic-scholar/doi-metadata", { doi: "10.1/in-flight" }));
+    // Let the first request register its in-flight promise in the cache before the second joins it.
+    await new Promise((resolve) => setImmediate(resolve));
+    const secondPromise = handler(makeEvent("/api/v1/semantic-scholar/doi-metadata", { doi: "10.1/in-flight" }));
+
+    resolveFetch();
+    const [first, second] = await Promise.all([firstPromise, secondPromise]);
+
+    expect(JSON.parse(first.body).meta.provider).toBe("openalex");
+    expect(JSON.parse(second.body).meta.provider).toBe("openalex");
+    expect(fetchOpenAlexDoiMetadata).toHaveBeenCalledTimes(1);
+  });
+
   it("uses OpenAlex when it succeeds, never calling Semantic Scholar", async () => {
     vi.mocked(fetchOpenAlexDoiMetadata).mockResolvedValue({
       title: "OpenAlex Paper",

@@ -58,4 +58,23 @@ describe("withProviderFallback", () => {
     const result = await withProviderFallback({ primary, fallback: vi.fn(), isFallbackEligible: () => true });
     expect(result).toBe("ok");
   });
+
+  it("does not swallow a throwing onProviderUsed into a spurious fallback", async () => {
+    const primary = vi.fn().mockResolvedValue("primary-result");
+    const fallback = vi.fn().mockResolvedValue("fallback-result");
+    const onProviderUsed = vi.fn().mockImplementation(() => {
+      throw new Error("observer blew up");
+    });
+
+    await expect(
+      withProviderFallback({
+        primary,
+        fallback,
+        isFallbackEligible: () => true,
+        onProviderUsed,
+      }),
+    ).rejects.toThrow("observer blew up");
+
+    expect(fallback).not.toHaveBeenCalled();
+  });
 });

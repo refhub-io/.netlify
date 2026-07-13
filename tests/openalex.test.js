@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { reconstructAbstractFromInvertedIndex, normalizePaperFromWork, fetchOpenAlexDoiMetadata, fetchOpenAlexReferences, fetchOpenAlexCitations, fetchOpenAlexSearch } from "../src/openalex.js";
+import { reconstructAbstractFromInvertedIndex, normalizePaperFromWork, fetchOpenAlexDoiMetadata, fetchOpenAlexReferences, fetchOpenAlexCitations, fetchOpenAlexSearch, takeOpenAlexBudget } from "../src/openalex.js";
 
 describe("reconstructAbstractFromInvertedIndex", () => {
   it("reorders words back into original sentence order", () => {
@@ -345,8 +345,6 @@ describe("fetchOpenAlexSearch", () => {
     ).rejects.toMatchObject({ code: "openalex_error" });
   });
 });
-
-import { takeOpenAlexBudget } from "../src/openalex.js";
 
 describe("takeOpenAlexBudget", () => {
   const config = { openalexDailyBudgetUsd: 1.0 };

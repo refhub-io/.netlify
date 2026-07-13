@@ -20,7 +20,18 @@ describe("getConfig OpenAlex settings", () => {
   });
 
   afterEach(() => {
-    process.env = { ...originalEnv };
+    // Mutate process.env's keys in place rather than reassigning the
+    // binding -- process.env is a special Node object, and replacing it
+    // wholesale can cause subtle cross-test issues for anything holding a
+    // reference to the original object.
+    for (const key of Object.keys(process.env)) {
+      if (!(key in originalEnv)) {
+        delete process.env[key];
+      }
+    }
+    for (const [key, value] of Object.entries(originalEnv)) {
+      process.env[key] = value;
+    }
   });
 
   it("defaults to null key, $1.00 budget, 8000ms timeout", () => {

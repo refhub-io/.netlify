@@ -44,8 +44,10 @@ import {
   isRefHubApiKeyValue,
   normalizePaperListRequest,
   normalizePaperLookupRequest,
+  normalizeRecommendationsRequest,
   normalizeSemanticScholarDoiRequest,
   normalizeSemanticScholarSearchRequest,
+  takeSemanticScholarRateLimit,
 } from "../src/semantic-scholar.js";
 
 // ── V2 route modules ──────────────────────────────────────────────────────────
@@ -145,7 +147,6 @@ const VAULT_PUBLICATION_SELECT = [
 const SEMANTIC_SCHOLAR_CACHE_TTL_MS = 60 * 1000;
 const SEMANTIC_SCHOLAR_CACHE_STALE_TTL_MS = 10 * 60 * 1000;
 const semanticScholarResponseCache = new Map();
-const semanticScholarRateLimitBuckets = new Map();
 
 function getSafeCorsHeaders(event) {
   try {
@@ -224,38 +225,6 @@ function pruneSemanticScholarState(now = Date.now()) {
       semanticScholarResponseCache.delete(key);
     }
   }
-
-  for (const [key, bucket] of semanticScholarRateLimitBuckets.entries()) {
-    if (bucket.resetAt <= now) {
-      semanticScholarRateLimitBuckets.delete(key);
-    }
-  }
-}
-
-function takeSemanticScholarRateLimit(userId, config = getConfig(), now = Date.now()) {
-  pruneSemanticScholarState(now);
-
-  const windowMs = config.semanticScholarRateLimitWindowMs;
-  const maxRequests = config.semanticScholarRateLimitMaxRequests;
-  const bucketKey = userId || "anonymous";
-  const existing = semanticScholarRateLimitBuckets.get(bucketKey);
-  if (!existing || existing.resetAt <= now) {
-    semanticScholarRateLimitBuckets.set(bucketKey, {
-      count: 1,
-      resetAt: now + windowMs,
-    });
-    return { allowed: true };
-  }
-
-  if (existing.count >= maxRequests) {
-    return {
-      allowed: false,
-      retryAfterSeconds: Math.max(1, Math.ceil((existing.resetAt - now) / 1000)),
-    };
-  }
-
-  existing.count += 1;
-  return { allowed: true };
 }
 
 function getCachedSemanticScholarValue(cacheKey, now = Date.now()) {
@@ -329,7 +298,7 @@ function ensureSemanticScholarReadScope(principal, context) {
   return null;
 }
 
-async function handleSemanticScholarPaperRoute(context, event, principal, routeName, fetcher) {
+async function handleSemanticScholarPaperRoute(context, event, principal, supabase, routeName, fetcher) {
   const scopeError = ensureSemanticScholarReadScope(principal, context);
   if (scopeError) return scopeError;
   const parsedBody = parseJsonBody(event);
@@ -349,7 +318,7 @@ async function handleSemanticScholarPaperRoute(context, event, principal, routeN
     ? await cached.value
     : await (async () => {
       const config = getConfig();
-      const rateLimit = takeSemanticScholarRateLimit(principal?.userId, config);
+      const rateLimit = await takeSemanticScholarRateLimit(supabase, config);
       if (!rateLimit.allowed) {
         return json(
           429,
@@ -437,14 +406,14 @@ function isApiKeySemanticScholarRoute(route) {
   ].includes(route[1]);
 }
 
-async function handleSemanticScholarRoute(context, event, principal, routeName) {
+async function handleSemanticScholarRoute(context, event, principal, supabase, routeName) {
   const canonicalRoute = routeName === "related" ? "recommendations" : routeName === "cited-by" ? "citations" : routeName;
-  if (canonicalRoute === "recommendations") return handlePaperRecommendations(context, event, principal);
-  if (canonicalRoute === "references") return handlePaperReferences(context, event, principal);
-  if (canonicalRoute === "citations") return handlePaperCitations(context, event, principal);
-  if (canonicalRoute === "lookup") return handlePaperLookup(context, event, principal);
-  if (canonicalRoute === "doi-metadata") return handleSemanticScholarDoiMetadataRoute(context, event, principal);
-  if (canonicalRoute === "search") return handleSemanticScholarSearchRoute(context, event, principal);
+  if (canonicalRoute === "recommendations") return handlePaperRecommendations(context, event, principal, supabase);
+  if (canonicalRoute === "references") return handlePaperReferences(context, event, principal, supabase);
+  if (canonicalRoute === "citations") return handlePaperCitations(context, event, principal, supabase);
+  if (canonicalRoute === "lookup") return handlePaperLookup(context, event, principal, supabase);
+  if (canonicalRoute === "doi-metadata") return handleSemanticScholarDoiMetadataRoute(context, event, principal, supabase);
+  if (canonicalRoute === "search") return handleSemanticScholarSearchRoute(context, event, principal, supabase);
   return errorResponse(404, "route_not_found", "Route not found", context.requestId);
 }
 
@@ -745,25 +714,82 @@ async function handleRevokeApiKey(supabase, principal, context, keyId) {
   });
 }
 
-async function handlePaperRecommendations(context, event, principal) {
-  return handleSemanticScholarPaperRoute(
-    context,
-    event,
-    principal,
-    "recommendations",
-    fetchSemanticScholarRecommendations,
-  );
+async function handlePaperRecommendations(context, event, principal, supabase) {
+  const scopeError = ensureSemanticScholarReadScope(principal, context);
+  if (scopeError) return scopeError;
+  const parsedBody = parseJsonBody(event);
+  if (!parsedBody.ok) {
+    return errorResponse(400, "invalid_json", "Request body must be valid JSON", context.requestId);
+  }
+
+  const normalizedRequest = normalizeRecommendationsRequest(parsedBody.value || {});
+  if (normalizedRequest.error) {
+    return errorResponse(400, normalizedRequest.error, normalizedRequest.message, context.requestId);
+  }
+
+  const { seedPaperIds, limit } = normalizedRequest.value;
+  const cacheKey = `recommendations:${[...seedPaperIds].sort().join(",")}:${limit}`;
+  const cached = getCachedSemanticScholarValue(cacheKey);
+  const papers = cached.hit
+    ? await cached.value
+    : await (async () => {
+      const config = getConfig();
+      const rateLimit = await takeSemanticScholarRateLimit(supabase, config);
+      if (!rateLimit.allowed) {
+        return json(
+          429,
+          {
+            error: {
+              code: "rate_limit_exceeded",
+              message: "Too many Semantic Scholar requests; please retry shortly",
+              details: {
+                retry_after_seconds: rateLimit.retryAfterSeconds,
+              },
+            },
+            meta: {
+              request_id: context.requestId,
+            },
+          },
+          {
+            "retry-after": String(rateLimit.retryAfterSeconds),
+          },
+        );
+      }
+
+      const timeout = AbortSignal.timeout(config.semanticScholarTimeoutMs);
+      return getCachedSemanticScholarResponse(cacheKey, () =>
+        fetchSemanticScholarRecommendations({
+          apiKey: config.semanticScholarApiKey,
+          seedPaperIds,
+          limit,
+          signal: timeout,
+        })
+      );
+    })();
+
+  if (papers?.statusCode) {
+    return papers;
+  }
+
+  return json(200, {
+    data: papers,
+    meta: {
+      request_id: context.requestId,
+      paper_ids: seedPaperIds,
+      limit,
+    },
+  });
 }
 
-async function handlePaperReferences(context, event, principal) {
-  return handleSemanticScholarPaperRoute(context, event, principal, "references", fetchSemanticScholarReferences);
+async function handlePaperReferences(context, event, principal, supabase) {
+  return handleSemanticScholarPaperRoute(context, event, principal, supabase, "references", fetchSemanticScholarReferences);
 }
 
-async function handlePaperCitations(context, event, principal) {
-  return handleSemanticScholarPaperRoute(context, event, principal, "citations", fetchSemanticScholarCitations);
+async function handlePaperCitations(context, event, principal, supabase) {
+  return handleSemanticScholarPaperRoute(context, event, principal, supabase, "citations", fetchSemanticScholarCitations);
 }
 
-async function handlePaperLookup(context, event, principal) {
+async function handlePaperLookup(context, event, principal, supabase) {
   const scopeError = ensureSemanticScholarReadScope(principal, context);
   if (scopeError) return scopeError;
   const parsedBody = parseJsonBody(event);
@@ -796,7 +822,7 @@ async function handlePaperLookup(context, event, principal) {
     ? await cached.value
     : await (async () => {
       const config = getConfig();
-      const rateLimit = takeSemanticScholarRateLimit(principal?.userId, config);
+      const rateLimit = await takeSemanticScholarRateLimit(supabase, config);
       if (!rateLimit.allowed) {
         return json(
           429,
@@ -852,7 +878,7 @@ async function handlePaperLookup(context, event, principal) {
     },
   });
 }
-async function handleSemanticScholarSearchRoute(context, event, principal) {
+async function handleSemanticScholarSearchRoute(context, event, principal, supabase) {
   const scopeError = ensureSemanticScholarReadScope(principal, context);
   if (scopeError) return scopeError;
   const parsedBody = parseJsonBody(event);
@@ -871,7 +897,8 @@ async function handleSemanticScholarSearchRoute(context, event, principal) {
   const papers = cached.hit
     ? await cached.value
     : await (async () => {
-      const rateLimit = takeSemanticScholarRateLimit(principal?.userId);
+      const config = getConfig();
+      const rateLimit = await takeSemanticScholarRateLimit(supabase, config);
       if (!rateLimit.allowed) {
         return json(
           429,
@@ -893,12 +920,11 @@ async function handleSemanticScholarSearchRoute(context, event, principal) {
         );
       }
 
-      const { semanticScholarApiKey } = getConfig();
-      const timeout = AbortSignal.timeout(8000);
+      const timeout = AbortSignal.timeout(config.semanticScholarTimeoutMs);
       try {
         return await getCachedSemanticScholarResponse(cacheKey, () =>
           fetchSemanticScholarSearch({
-            apiKey: semanticScholarApiKey,
+            apiKey: config.semanticScholarApiKey,
             query,
             limit,
             signal: timeout,
@@ -928,7 +954,7 @@ async function handleSemanticScholarSearchRoute(context, event, principal) {
   });
 }
 
-async function handleSemanticScholarDoiMetadataRoute(context, event, principal) {
+async function handleSemanticScholarDoiMetadataRoute(context, event, principal, supabase) {
   if (!requireScope(principal, API_SCOPES.READ)) {
     return errorResponse(403, "missing_scope", "Scope vaults:read is required", context.requestId);
   }
@@ -957,7 +983,7 @@ async function handleSemanticScholarDoiMetadataRoute(context, event, principal) 
   const metadata = cached.hit
     ? await cached.value
     : await (async () => {
-      const rateLimit = takeSemanticScholarRateLimit(principal?.userId, config);
+      const rateLimit = await takeSemanticScholarRateLimit(supabase, config);
       if (!rateLimit.allowed) {
         return json(
           429,
@@ -2042,7 +2068,7 @@ export async function handler(event) {
       principal = authResult.principal;
 
       if (isLegacySemanticScholarRoute(route) && event.httpMethod === "POST") {
-        response = await handleSemanticScholarRoute(context, event, principal, route[0]);
+        response = await handleSemanticScholarRoute(context, event, principal, supabase, route[0]);
       } else if (route.length === 1 && route[0] === "keys" && event.httpMethod === "GET") {
         response = await handleListApiKeys(supabase, principal, context);
       } else if (route.length === 1 && route[0] === "keys" && event.httpMethod === "POST") {
@@ -2090,7 +2116,7 @@ export async function handler(event) {
       principal = authResult.principal;
 
       if (isApiKeySemanticScholarRoute(route) && event.httpMethod === "POST") {
-        response = await handleSemanticScholarRoute(context, event, principal, route[1]);
+        response = await handleSemanticScholarRoute(context, event, principal, supabase, route[1]);
       } else if (route.length === 1 && route[0] === "vaults" && event.httpMethod === "GET") {
         response = await handleListVaults(supabase, principal, context);
       // ── V2: vault CRUD ──────────────────────────────────────────────────────

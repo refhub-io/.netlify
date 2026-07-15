@@ -54,7 +54,7 @@ async function parseOpenAlexJson(response) {
   }
 }
 
-function assertSuccessfulOpenAlexResponse(response, notFoundError) {
+function assertSuccessfulOpenAlexResponse(response, { notFoundError, requestError } = {}) {
   if (response.status === 404 && notFoundError) {
     throw createOpenAlexError(
       notFoundError.code,
@@ -65,7 +65,12 @@ function assertSuccessfulOpenAlexResponse(response, notFoundError) {
   }
 
   if (!response.ok) {
-    throw createOpenAlexError("openalex_error", "OpenAlex request failed", 502, {
+    const override = requestError || {
+      code: "openalex_error",
+      message: "OpenAlex request failed",
+      status: 502,
+    };
+    throw createOpenAlexError(override.code, override.message, override.status, {
       upstream_status: response.status,
     });
   }
@@ -130,9 +135,7 @@ export async function fetchOpenAlexDoiMetadata({ apiKey, doi, signal }) {
     signal,
   });
   assertSuccessfulOpenAlexResponse(response, {
-    code: "openalex_not_found",
-    message: "OpenAlex work was not found",
-    status: 404,
+    notFoundError: { code: "openalex_not_found", message: "OpenAlex work was not found", status: 404 },
   });
 
   const work = await parseOpenAlexJson(response);
@@ -162,9 +165,7 @@ export async function fetchOpenAlexReferences({ apiKey, doi, limit, signal }) {
     signal,
   });
   assertSuccessfulOpenAlexResponse(workResponse, {
-    code: "openalex_not_found",
-    message: "OpenAlex work was not found",
-    status: 404,
+    notFoundError: { code: "openalex_not_found", message: "OpenAlex work was not found", status: 404 },
   });
 
   const work = await parseOpenAlexJson(workResponse);
@@ -191,9 +192,7 @@ export async function fetchOpenAlexReferences({ apiKey, doi, limit, signal }) {
     signal,
   });
   assertSuccessfulOpenAlexResponse(listResponse, {
-    code: "openalex_error",
-    message: "OpenAlex reference lookup failed",
-    status: 502,
+    requestError: { code: "openalex_error", message: "OpenAlex reference lookup failed", status: 502 },
   });
 
   const payload = await parseOpenAlexJson(listResponse);
@@ -209,9 +208,7 @@ export async function fetchOpenAlexCitations({ apiKey, doi, limit, signal }) {
     signal,
   });
   assertSuccessfulOpenAlexResponse(workResponse, {
-    code: "openalex_not_found",
-    message: "OpenAlex work was not found",
-    status: 404,
+    notFoundError: { code: "openalex_not_found", message: "OpenAlex work was not found", status: 404 },
   });
 
   const work = await parseOpenAlexJson(workResponse);
@@ -228,9 +225,7 @@ export async function fetchOpenAlexCitations({ apiKey, doi, limit, signal }) {
     signal,
   });
   assertSuccessfulOpenAlexResponse(listResponse, {
-    code: "openalex_error",
-    message: "OpenAlex citation lookup failed",
-    status: 502,
+    requestError: { code: "openalex_error", message: "OpenAlex citation lookup failed", status: 502 },
   });
 
   const payload = await parseOpenAlexJson(listResponse);
@@ -252,9 +247,7 @@ export async function fetchOpenAlexSearch({ apiKey, query, limit, signal }) {
     signal,
   });
   assertSuccessfulOpenAlexResponse(response, {
-    code: "openalex_error",
-    message: "OpenAlex search failed",
-    status: 502,
+    requestError: { code: "openalex_error", message: "OpenAlex search failed", status: 502 },
   });
 
   const payload = await parseOpenAlexJson(response);

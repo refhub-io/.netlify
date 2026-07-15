@@ -264,7 +264,7 @@ describe("fetchOpenAlexReferences", () => {
 
     await expect(
       fetchOpenAlexReferences({ apiKey: "test-key", doi: "10.1038/nature12373", limit: 10, signal: undefined }),
-    ).rejects.toMatchObject({ code: "openalex_error" });
+    ).rejects.toMatchObject({ code: "openalex_error", message: "OpenAlex reference lookup failed" });
   });
 });
 
@@ -314,7 +314,7 @@ describe("fetchOpenAlexCitations", () => {
 
     await expect(
       fetchOpenAlexCitations({ apiKey: "test-key", doi: "10.1/x", limit: 10, signal: undefined }),
-    ).rejects.toMatchObject({ code: "openalex_error" });
+    ).rejects.toMatchObject({ code: "openalex_error", message: "OpenAlex citation lookup failed" });
   });
 });
 
@@ -350,7 +350,7 @@ describe("fetchOpenAlexSearch", () => {
 
     await expect(
       fetchOpenAlexSearch({ apiKey: "test-key", query: "x", limit: 20, signal: undefined }),
-    ).rejects.toMatchObject({ code: "openalex_error" });
+    ).rejects.toMatchObject({ code: "openalex_error", message: "OpenAlex search failed" });
   });
 });
 

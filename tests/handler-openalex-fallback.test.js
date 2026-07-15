@@ -390,7 +390,12 @@ describe("references/citations routes: DOI-prefixed paper_id triggers OpenAlex p
     );
 
     expect(res.statusCode).toBe(200);
-    expect(JSON.parse(res.body).meta.provider).toBe("semantic_scholar");
+    // The recommendations route (rewritten in #27 for batched paper_ids) has
+    // its own response shape that never included a meta.provider field --
+    // unlike the other routes, it doesn't go through handleSemanticScholarPaperRoute
+    // and structurally never touches OpenAlex at all (no OPENALEX_FETCHERS_BY_ROUTE
+    // entry for "recommendations"), so there's no provider to report.
+    expect(JSON.parse(res.body).meta.provider).toBeUndefined();
     expect(fetchOpenAlexReferences).not.toHaveBeenCalled();
     expect(fetchOpenAlexCitations).not.toHaveBeenCalled();
     expect(fetchSemanticScholarRecommendations).toHaveBeenCalledTimes(1);

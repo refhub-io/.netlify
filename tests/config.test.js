@@ -14,9 +14,16 @@ describe("getConfig OpenAlex settings", () => {
     for (const [key, value] of Object.entries(REQUIRED_ENV)) {
       process.env[key] = value;
     }
-    delete process.env.OPENALEX_API_KEY;
-    delete process.env.OPENALEX_DAILY_BUDGET_USD;
-    delete process.env.OPENALEX_TIMEOUT_MS;
+    // Set to "" rather than deleting: getConfig() lazily backfills any
+    // process.env key that's still undefined from a local .env/.env.local
+    // file on its first call (see ensureLocalEnvLoaded in src/config.js),
+    // which would silently reintroduce a real local OPENALEX_API_KEY here
+    // and break the "defaults to null" expectation below. An empty string
+    // isn't undefined, so it skips that backfill, and getConfig()'s own
+    // falsy-checks (|| null, readPositiveNumber) treat "" the same as unset.
+    process.env.OPENALEX_API_KEY = "";
+    process.env.OPENALEX_DAILY_BUDGET_USD = "";
+    process.env.OPENALEX_TIMEOUT_MS = "";
   });
 
   afterEach(() => {

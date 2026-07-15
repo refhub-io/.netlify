@@ -49,6 +49,16 @@ import {
   normalizeSemanticScholarSearchRequest,
   takeSemanticScholarRateLimit,
 } from "../src/semantic-scholar.js";
+import {
+  fetchOpenAlexCitations,
+  fetchOpenAlexDoiMetadata,
+  fetchOpenAlexReferences,
+  fetchOpenAlexSearch,
+  OPENALEX_CITATIONS_COST_USD,
+  OPENALEX_SEARCH_COST_USD,
+  takeOpenAlexBudget,
+} from "../src/openalex.js";
+import { withProviderFallback } from "../src/providerFallback.js";
 
 // ── V2 route modules ──────────────────────────────────────────────────────────
 import {
@@ -225,6 +235,44 @@ function pruneSemanticScholarState(now = Date.now()) {
       semanticScholarResponseCache.delete(key);
     }
   }
+
+}
+
+// This gate protects the shared SEMANTIC_SCHOLAR_API_KEY specifically, so it
+// must only fire on code paths that actually call Semantic Scholar -- not on
+// every request to a route that OpenAlex could serve entirely on its own.
+// Callers throw this from inside their fetchFromSemanticScholar closure
+// (called lazily, only when SS is really about to be hit) rather than
+// checking it upfront, so an exhausted SS bucket never blocks an
+// OpenAlex-servable request. The code is deliberately distinct from the
+// upstream "semantic_scholar_rate_limited" (SS's own 429) so the two are
+// never confused by callers like the search route's stale-value fallback.
+function createLocalPaperRateLimitError(retryAfterSeconds) {
+  const error = new Error("Too many paper-metadata requests; please retry shortly");
+  error.code = "local_paper_rate_limited";
+  error.retryAfterSeconds = retryAfterSeconds;
+  return error;
+}
+
+function buildLocalPaperRateLimitResponse(error, requestId) {
+  return json(
+    429,
+    {
+      error: {
+        code: "rate_limit_exceeded",
+        message: error.message,
+        details: {
+          retry_after_seconds: error.retryAfterSeconds,
+        },
+      },
+      meta: {
+        request_id: requestId,
+      },
+    },
+    {
+      "retry-after": String(error.retryAfterSeconds),
+    },
+  );
 }
 
 function getCachedSemanticScholarValue(cacheKey, now = Date.now()) {
@@ -298,6 +346,43 @@ function ensureSemanticScholarReadScope(principal, context) {
   return null;
 }
 
+const OPENALEX_FALLBACK_ELIGIBLE_CODES = new Set([
+  "openalex_not_found",
+  "openalex_error",
+  "openalex_timeout",
+  "openalex_unreachable",
+]);
+
+function isOpenAlexFallbackEligible(error) {
+  return OPENALEX_FALLBACK_ELIGIBLE_CODES.has(error?.code);
+}
+
+// take_openalex_budget can throw for reasons unrelated to the budget itself
+// (RPC missing because the migration hasn't been applied yet, a transient
+// Postgres error, etc.). None of those should turn into a 500 -- they should
+// no-op back to Semantic-Scholar-only, same as a real "budget exceeded".
+async function takeOpenAlexBudgetOrFallback(config, cost) {
+  try {
+    return await takeOpenAlexBudget(getSupabaseAdmin(), config, cost);
+  } catch (error) {
+    console.error("OpenAlex budget check failed; falling back to Semantic Scholar", {
+      code: error?.code,
+      message: error?.message,
+    });
+    return { allowed: false, spentUsd: null };
+  }
+}
+
+const OPENALEX_FETCHERS_BY_ROUTE = {
+  references: fetchOpenAlexReferences,
+  citations: fetchOpenAlexCitations,
+};
+
+const OPENALEX_COST_BY_ROUTE = {
+  references: 0,
+  citations: OPENALEX_CITATIONS_COST_USD,
+};
+
 async function handleSemanticScholarPaperRoute(context, event, principal, supabase, routeName, fetcher) {
   const scopeError = ensureSemanticScholarReadScope(principal, context);
   if (scopeError) return scopeError;
@@ -314,42 +399,62 @@ async function handleSemanticScholarPaperRoute(context, event, principal, supaba
   const { seedPaperId, limit } = normalizedRequest.value;
   const cacheKey = `${routeName}:${seedPaperId}:${limit}`;
   const cached = getCachedSemanticScholarValue(cacheKey);
-  const papers = cached.hit
+  // The fetcher resolves to {value, provider} and that whole tuple is what
+  // gets cached/shared, so a concurrent request joining an in-flight promise
+  // reads the real provider from the same object it's already awaiting --
+  // no separate side-channel lookup that could race the write.
+  const outcome = cached.hit
     ? await cached.value
     : await (async () => {
       const config = getConfig();
-      const rateLimit = await takeSemanticScholarRateLimit(supabase, config);
-      if (!rateLimit.allowed) {
-        return json(
-          429,
-          {
-            error: {
-              code: "rate_limit_exceeded",
-              message: "Too many Semantic Scholar requests; please retry shortly",
-              details: {
-                retry_after_seconds: rateLimit.retryAfterSeconds,
-              },
-            },
-            meta: {
-              request_id: context.requestId,
-            },
-          },
-          {
-            "retry-after": String(rateLimit.retryAfterSeconds),
-          },
-        );
-      }
-
       const timeout = AbortSignal.timeout(config.semanticScholarTimeoutMs);
-      return getCachedSemanticScholarResponse(cacheKey, () =>
-        fetcher({
-          apiKey: config.semanticScholarApiKey,
-          seedPaperId,
-          limit,
-          signal: timeout,
-        })
-      );
+      const fetchFromSemanticScholar = async () => {
+        const rateLimit = await takeSemanticScholarRateLimit(supabase, config);
+        if (!rateLimit.allowed) {
+          throw createLocalPaperRateLimitError(rateLimit.retryAfterSeconds);
+        }
+        return fetcher({ apiKey: config.semanticScholarApiKey, seedPaperId, limit, signal: timeout });
+      };
+
+      try {
+        return await getCachedSemanticScholarResponse(cacheKey, async () => {
+          const openAlexFetcher = OPENALEX_FETCHERS_BY_ROUTE[routeName];
+          const doiMatch = /^DOI:(.+)$/i.exec(seedPaperId);
+
+          if (!openAlexFetcher || !config.openalexApiKey || !doiMatch) {
+            return { value: await fetchFromSemanticScholar(), provider: "semantic_scholar" };
+          }
+
+          const cost = OPENALEX_COST_BY_ROUTE[routeName] ?? 0;
+          if (cost > 0) {
+            const budget = await takeOpenAlexBudgetOrFallback(config, cost);
+            if (!budget.allowed) {
+              return { value: await fetchFromSemanticScholar(), provider: "semantic_scholar" };
+            }
+          }
+
+          const bareDoi = doiMatch[1];
+          const openAlexTimeout = AbortSignal.timeout(config.openalexTimeoutMs);
+          let provider;
+          const value = await withProviderFallback({
+            primary: () => openAlexFetcher({ apiKey: config.openalexApiKey, doi: bareDoi, limit, signal: openAlexTimeout }),
+            fallback: fetchFromSemanticScholar,
+            isFallbackEligible: isOpenAlexFallbackEligible,
+            onProviderUsed: (usedProvider) => {
+              provider = usedProvider;
+            },
+          });
+          return { value, provider };
+        });
+      } catch (error) {
+        if (error?.code === "local_paper_rate_limited") {
+          return { value: buildLocalPaperRateLimitResponse(error, context.requestId), provider: null };
+        }
+        throw error;
+      }
     })();
+
+  const { value: papers, provider } = outcome;
 
   if (papers?.statusCode) {
     return papers;
@@ -361,6 +466,7 @@ async function handleSemanticScholarPaperRoute(context, event, principal, supaba
       request_id: context.requestId,
       paper_id: seedPaperId,
       limit,
+      provider,
     },
   });
 }
@@ -894,43 +1000,51 @@ async function handleSemanticScholarSearchRoute(context, event, principal, supab
   const { query, limit } = normalizedRequest.value;
   const cacheKey = `search:${query.toLowerCase()}:${limit}`;
   const cached = getCachedSemanticScholarValue(cacheKey);
-  const papers = cached.hit
+  // The fetcher resolves to {value, provider}, and that tuple is what's
+  // cached/shared (including the stale fallback below), so every reader --
+  // fresh, in-flight-joined, or stale -- gets the provider from the exact
+  // object it's already awaiting, with no separate side-channel to race.
+  const outcome = cached.hit
     ? await cached.value
     : await (async () => {
       const config = getConfig();
-      const rateLimit = await takeSemanticScholarRateLimit(supabase, config);
-      if (!rateLimit.allowed) {
-        return json(
-          429,
-          {
-            error: {
-              code: "rate_limit_exceeded",
-              message: "Too many Semantic Scholar requests; please retry shortly",
-              details: {
-                retry_after_seconds: rateLimit.retryAfterSeconds,
-              },
-            },
-            meta: {
-              request_id: context.requestId,
-            },
-          },
-          {
-            "retry-after": String(rateLimit.retryAfterSeconds),
-          },
-        );
-      }
-
       const timeout = AbortSignal.timeout(config.semanticScholarTimeoutMs);
+      const fetchFromSemanticScholar = async () => {
+        const rateLimit = await takeSemanticScholarRateLimit(supabase, config);
+        if (!rateLimit.allowed) {
+          throw createLocalPaperRateLimitError(rateLimit.retryAfterSeconds);
+        }
+        return fetchSemanticScholarSearch({ apiKey: config.semanticScholarApiKey, query, limit, signal: timeout });
+      };
+
       try {
-        return await getCachedSemanticScholarResponse(cacheKey, () =>
-          fetchSemanticScholarSearch({
-            apiKey: config.semanticScholarApiKey,
-            query,
-            limit,
-            signal: timeout,
-          })
-        );
+        return await getCachedSemanticScholarResponse(cacheKey, async () => {
+          if (!config.openalexApiKey) {
+            return { value: await fetchFromSemanticScholar(), provider: "semantic_scholar" };
+          }
+
+          const budget = await takeOpenAlexBudgetOrFallback(config, OPENALEX_SEARCH_COST_USD);
+          if (!budget.allowed) {
+            return { value: await fetchFromSemanticScholar(), provider: "semantic_scholar" };
+          }
+
+          const openAlexTimeout = AbortSignal.timeout(config.openalexTimeoutMs);
+          let provider;
+          const value = await withProviderFallback({
+            primary: () => fetchOpenAlexSearch({ apiKey: config.openalexApiKey, query, limit, signal: openAlexTimeout }),
+            fallback: fetchFromSemanticScholar,
+            isFallbackEligible: isOpenAlexFallbackEligible,
+            onProviderUsed: (usedProvider) => {
+              provider = usedProvider;
+            },
+          });
+          return { value, provider };
+        });
       } catch (error) {
+        if (error?.code === "local_paper_rate_limited") {
+          return { value: buildLocalPaperRateLimitResponse(error, context.requestId), provider: null };
+        }
+
         const stale = getStaleSemanticScholarValue(cacheKey);
         if (error?.code === "semantic_scholar_rate_limited" && stale.hit) {
           return stale.value;
@@ -939,6 +1053,8 @@ async function handleSemanticScholarSearchRoute(context, event, principal, supab
         throw error;
       }
     })();
+
+  const { value: papers, provider } = outcome;
 
   if (papers?.statusCode) {
     return papers;
@@ -950,6 +1066,7 @@ async function handleSemanticScholarSearchRoute(context, event, principal, supab
       request_id: context.requestId,
       query,
       limit,
+      provider,
     },
   });
 }
@@ -959,11 +1076,12 @@ async function handleSemanticScholarDoiMetadataRoute(context, event, principal, 
     return errorResponse(403, "missing_scope", "Scope vaults:read is required", context.requestId);
   }
 
-  // Semantic Scholar is disabled when no API key is configured. Without a key
-  // the unauthenticated rate limit (1 req/s shared) is hit almost immediately.
-  // Set SEMANTIC_SCHOLAR_API_KEY in the environment to re-enable this route.
+  // This route is disabled only when neither provider is configured at all.
+  // SEMANTIC_SCHOLAR_API_KEY is not required on its own -- it just raises
+  // Semantic Scholar's rate limit above the shared unauthenticated 1 req/s;
+  // OPENALEX_API_KEY alone is enough to serve this route.
   const config = getConfig();
-  if (!config.semanticScholarApiKey) {
+  if (!config.semanticScholarApiKey && !config.openalexApiKey) {
     return errorResponse(503, "semantic_scholar_disabled", "Semantic Scholar metadata enrichment is not configured on this server.", context.requestId);
   }
 
@@ -980,40 +1098,48 @@ async function handleSemanticScholarDoiMetadataRoute(context, event, principal, 
   const { doi } = normalizedRequest.value;
   const cacheKey = `doi-metadata:${doi}`;
   const cached = getCachedSemanticScholarValue(cacheKey);
-  const metadata = cached.hit
+  // The fetcher resolves to {value, provider}, cached/shared as a single
+  // tuple, so a concurrent request joining an in-flight promise reads the
+  // real provider from the same object it's already awaiting.
+  const outcome = cached.hit
     ? await cached.value
     : await (async () => {
-      const rateLimit = await takeSemanticScholarRateLimit(supabase, config);
-      if (!rateLimit.allowed) {
-        return json(
-          429,
-          {
-            error: {
-              code: "rate_limit_exceeded",
-              message: "Too many Semantic Scholar requests; please retry shortly",
-              details: {
-                retry_after_seconds: rateLimit.retryAfterSeconds,
-              },
-            },
-            meta: {
-              request_id: context.requestId,
-            },
-          },
-          {
-            "retry-after": String(rateLimit.retryAfterSeconds),
-          },
-        );
-      }
-
       const timeout = AbortSignal.timeout(config.semanticScholarTimeoutMs);
-      return getCachedSemanticScholarResponse(cacheKey, () =>
-        fetchSemanticScholarDoiMetadata({
-          apiKey: config.semanticScholarApiKey,
-          doi,
-          signal: timeout,
-        })
-      );
+      const fetchFromSemanticScholar = async () => {
+        const rateLimit = await takeSemanticScholarRateLimit(supabase, config);
+        if (!rateLimit.allowed) {
+          throw createLocalPaperRateLimitError(rateLimit.retryAfterSeconds);
+        }
+        return fetchSemanticScholarDoiMetadata({ apiKey: config.semanticScholarApiKey, doi, signal: timeout });
+      };
+
+      try {
+        return await getCachedSemanticScholarResponse(cacheKey, async () => {
+          if (!config.openalexApiKey) {
+            return { value: await fetchFromSemanticScholar(), provider: "semantic_scholar" };
+          }
+
+          const openAlexTimeout = AbortSignal.timeout(config.openalexTimeoutMs);
+          let provider;
+          const value = await withProviderFallback({
+            primary: () => fetchOpenAlexDoiMetadata({ apiKey: config.openalexApiKey, doi, signal: openAlexTimeout }),
+            fallback: fetchFromSemanticScholar,
+            isFallbackEligible: isOpenAlexFallbackEligible,
+            onProviderUsed: (usedProvider) => {
+              provider = usedProvider;
+            },
+          });
+          return { value, provider };
+        });
+      } catch (error) {
+        if (error?.code === "local_paper_rate_limited") {
+          return { value: buildLocalPaperRateLimitResponse(error, context.requestId), provider: null };
+        }
+        throw error;
+      }
     })();
+
+  const { value: metadata, provider } = outcome;
 
   if (metadata?.statusCode) {
     return metadata;
@@ -1024,6 +1150,7 @@ async function handleSemanticScholarDoiMetadataRoute(context, event, principal, 
     meta: {
       request_id: context.requestId,
       doi,
+      provider,
     },
   });
 }

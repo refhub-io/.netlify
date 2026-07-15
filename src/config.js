@@ -7,6 +7,8 @@ const DEFAULT_ALLOWED_ORIGINS = ["https://refhub.io", "http://localhost:3000", "
 const DEFAULT_SEMANTIC_SCHOLAR_RATE_LIMIT_MAX_REQUESTS = 60;
 const DEFAULT_SEMANTIC_SCHOLAR_RATE_LIMIT_WINDOW_MS = 60 * 1000;
 const DEFAULT_SEMANTIC_SCHOLAR_TIMEOUT_MS = 8000;
+const DEFAULT_OPENALEX_DAILY_BUDGET_USD = 1.0;
+const DEFAULT_OPENALEX_TIMEOUT_MS = 8000;
 const LOCAL_ENV_FILES = [".env.local", ".env"];
 
 let localEnvLoaded = false;
@@ -86,6 +88,20 @@ function readPositiveInteger(name, defaultValue) {
   return value;
 }
 
+function readPositiveNumber(name, defaultValue) {
+  const raw = process.env[name];
+  if (raw === undefined || raw === null || raw === "") {
+    return defaultValue;
+  }
+
+  const value = Number(raw);
+  if (!Number.isFinite(value) || value <= 0) {
+    throw new Error(`${name} must be a positive number`);
+  }
+
+  return value;
+}
+
 export function getConfig() {
   ensureLocalEnvLoaded();
 
@@ -106,6 +122,15 @@ export function getConfig() {
     semanticScholarTimeoutMs: readPositiveInteger(
       "SEMANTIC_SCHOLAR_TIMEOUT_MS",
       DEFAULT_SEMANTIC_SCHOLAR_TIMEOUT_MS,
+    ),
+    openalexApiKey: process.env.OPENALEX_API_KEY || null,
+    openalexDailyBudgetUsd: readPositiveNumber(
+      "OPENALEX_DAILY_BUDGET_USD",
+      DEFAULT_OPENALEX_DAILY_BUDGET_USD,
+    ),
+    openalexTimeoutMs: readPositiveInteger(
+      "OPENALEX_TIMEOUT_MS",
+      DEFAULT_OPENALEX_TIMEOUT_MS,
     ),
     googleDriveClientId: process.env.GOOGLE_DRIVE_CLIENT_ID || null,
     googleDriveClientSecret: process.env.GOOGLE_DRIVE_CLIENT_SECRET || null,

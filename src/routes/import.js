@@ -15,6 +15,7 @@ import { json, errorResponse, parseJsonBody } from "../http.js";
 import { getConfig } from "../config.js";
 import { parseBibtex } from "../bibtex.js";
 import { VAULT_PUBLICATION_SELECT, touchVaultUpdatedAt } from "./utils.js";
+import { reconstructAbstractFromInvertedIndex } from "../openalex.js";
 
 // ---------------------------------------------------------------------------
 // DOI metadata fetchers
@@ -67,15 +68,6 @@ async function fetchFromCrossRef(doi) {
   }
 }
 
-function reconstructAbstract(invertedIndex) {
-  const words = [];
-  for (const [word, positions] of Object.entries(invertedIndex)) {
-    for (const pos of positions) words.push([word, pos]);
-  }
-  words.sort((a, b) => a[1] - b[1]);
-  return words.map((w) => w[0]).join(" ");
-}
-
 async function fetchFromOpenAlex(doi) {
   try {
     const resp = await fetch(`https://api.openalex.org/works/doi:${encodeURIComponent(doi)}`, {
@@ -100,7 +92,7 @@ async function fetchFromOpenAlex(doi) {
       issue: biblio.issue || null,
       pages,
       url: `https://doi.org/${doi}`,
-      abstract: w.abstract_inverted_index ? reconstructAbstract(w.abstract_inverted_index) : null,
+      abstract: w.abstract_inverted_index ? reconstructAbstractFromInvertedIndex(w.abstract_inverted_index) : null,
       type: "article",
     };
   } catch {

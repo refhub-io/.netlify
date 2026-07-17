@@ -257,6 +257,95 @@ export async function fetchOpenAlexSearch({ apiKey, query, limit, signal }) {
 
 export const OPENALEX_SEARCH_COST_USD = 0.001;
 
+// Resolves the DOI-addressable id a title search points at, for use as an
+// OpenAlex-first replacement of Semantic Scholar's title-lookup route. Only
+// the DOI is useful here (not the full normalized paper) because downstream
+// routes (references/citations/recommendations) key off the DOI: pseudo-id
+// convention shared by both providers -- see the doiMatch regex in
+// functions/api-v1.js.
+export async function fetchOpenAlexPaperIdByTitle({ apiKey, title, signal }) {
+  const results = await fetchOpenAlexSearch({ apiKey, query: title, limit: 1, signal });
+  const doi = results[0]?.external_ids?.DOI;
+
+  if (!doi) {
+    throw createOpenAlexError(
+      "openalex_not_found",
+      "OpenAlex found no DOI-addressable match for the given title",
+      404,
+    );
+  }
+
+  return `DOI:${doi}`;
+}
+
+const MAX_RELATED_WORKS_OR_FILTER = 100;
+
+export const OPENALEX_RECOMMENDATIONS_COST_USD = 0.0005;
+
+// OpenAlex has no Semantic-Scholar-style "recommendations" endpoint, so this
+// approximates it with each seed's own `related_works` (a list of OpenAlex
+// work ids OpenAlex itself considers related), unioned and deduplicated
+// across every seed, then hydrated in one batched list request -- the same
+// shape fetchOpenAlexReferences/fetchOpenAlexCitations already use.
+export async function fetchOpenAlexRecommendationsForSet({ apiKey, dois, limit, signal }) {
+  const outcomes = await Promise.all(
+    dois.map(async (doi) => {
+      try {
+        const workUrl = withApiKey(new URL(`${OPENALEX_BASE_URL}/works/doi:${encodeURIComponent(doi)}`), apiKey);
+        const workResponse = await requestOpenAlex(workUrl, {
+          method: "GET",
+          headers: { accept: "application/json" },
+          signal,
+        });
+        assertSuccessfulOpenAlexResponse(workResponse, {
+          notFoundError: { code: "openalex_not_found", message: "OpenAlex work was not found", status: 404 },
+        });
+
+        const work = await parseOpenAlexJson(workResponse);
+        const relatedIds = Array.isArray(work.related_works) ? work.related_works.map(stripOpenAlexIdPrefix) : [];
+        return { ok: true, relatedIds };
+      } catch {
+        return { ok: false, relatedIds: [] };
+      }
+    }),
+  );
+
+  // Only bail out (letting the caller fall back to Semantic Scholar for the
+  // whole batch) when every seed lookup failed outright. If some seeds
+  // resolved -- even to zero related works each -- that's OpenAlex's real
+  // answer, not a failure, so it returns normally (possibly empty).
+  if (outcomes.every((outcome) => !outcome.ok)) {
+    throw createOpenAlexError("openalex_error", "OpenAlex could not resolve any of the given seeds", 502);
+  }
+
+  const relatedIds = [...new Set(outcomes.flatMap((outcome) => outcome.relatedIds))].slice(
+    0,
+    MAX_RELATED_WORKS_OR_FILTER,
+  );
+
+  if (relatedIds.length === 0) {
+    return [];
+  }
+
+  const listUrl = withApiKey(new URL(`${OPENALEX_BASE_URL}/works`), apiKey);
+  listUrl.searchParams.set("filter", `openalex_id:${relatedIds.join("|")}`);
+  listUrl.searchParams.set("select", OPENALEX_HYDRATE_FIELDS.join(","));
+  listUrl.searchParams.set("per-page", String(relatedIds.length));
+
+  const listResponse = await requestOpenAlex(listUrl, {
+    method: "GET",
+    headers: { accept: "application/json" },
+    signal,
+  });
+  assertSuccessfulOpenAlexResponse(listResponse, {
+    requestError: { code: "openalex_error", message: "OpenAlex related-works lookup failed", status: 502 },
+  });
+
+  const payload = await parseOpenAlexJson(listResponse);
+  const results = Array.isArray(payload.results) ? payload.results : [];
+  return results.map(normalizePaperFromWork).slice(0, limit);
+}
+
 const OPENALEX_BUDGET_BUCKET_KEY = "global";
 
 export async function takeOpenAlexBudget(supabase, config, costUsd) {

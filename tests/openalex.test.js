@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { reconstructAbstractFromInvertedIndex, normalizePaperFromWork, fetchOpenAlexDoiMetadata, fetchOpenAlexReferences, fetchOpenAlexCitations, fetchOpenAlexSearch, takeOpenAlexBudget } from "../src/openalex.js";
+import { reconstructAbstractFromInvertedIndex, normalizePaperFromWork, fetchOpenAlexDoiMetadata, fetchOpenAlexReferences, fetchOpenAlexCitations, fetchOpenAlexSearch, fetchOpenAlexRecommendationsForSet, fetchOpenAlexPaperIdByTitle, takeOpenAlexBudget } from "../src/openalex.js";
 
 describe("reconstructAbstractFromInvertedIndex", () => {
   it("reorders words back into original sentence order", () => {
@@ -351,6 +351,179 @@ describe("fetchOpenAlexSearch", () => {
     await expect(
       fetchOpenAlexSearch({ apiKey: "test-key", query: "x", limit: 20, signal: undefined }),
     ).rejects.toMatchObject({ code: "openalex_error", message: "OpenAlex search failed" });
+  });
+});
+
+describe("fetchOpenAlexRecommendationsForSet", () => {
+  beforeEach(() => {
+    vi.stubGlobal("fetch", vi.fn());
+  });
+
+  it("unions related_works across every seed, then hydrates the deduplicated set", async () => {
+    vi.mocked(fetch)
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({ id: "https://openalex.org/W1", related_works: ["https://openalex.org/W10", "https://openalex.org/W11"] }),
+          { status: 200 },
+        ),
+      )
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({ id: "https://openalex.org/W2", related_works: ["https://openalex.org/W11", "https://openalex.org/W12"] }),
+          { status: 200 },
+        ),
+      )
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            results: [
+              { id: "https://openalex.org/W10", title: "Related Ten" },
+              { id: "https://openalex.org/W11", title: "Related Eleven" },
+              { id: "https://openalex.org/W12", title: "Related Twelve" },
+            ],
+          }),
+          { status: 200 },
+        ),
+      );
+
+    const papers = await fetchOpenAlexRecommendationsForSet({
+      apiKey: "test-key",
+      dois: ["10.1/a", "10.1/b"],
+      limit: 10,
+      signal: undefined,
+    });
+
+    expect(papers).toEqual([
+      expect.objectContaining({ paper_id: "W10", title: "Related Ten" }),
+      expect.objectContaining({ paper_id: "W11", title: "Related Eleven" }),
+      expect.objectContaining({ paper_id: "W12", title: "Related Twelve" }),
+    ]);
+
+    expect(fetch).toHaveBeenCalledTimes(3);
+    const [, , thirdUrl] = vi.mocked(fetch).mock.calls.map((call) => String(call[0]));
+    // W11 appears in both seeds' related_works but the hydration filter only
+    // requests it once -- confirms the union is deduplicated before hydrating.
+    expect((thirdUrl.match(/W11/g) || []).length).toBe(1);
+  });
+
+  it("respects the limit by truncating the hydrated result", async () => {
+    vi.mocked(fetch)
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({ id: "https://openalex.org/W1", related_works: ["https://openalex.org/W10", "https://openalex.org/W11"] }),
+          { status: 200 },
+        ),
+      )
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            results: [
+              { id: "https://openalex.org/W10", title: "Related Ten" },
+              { id: "https://openalex.org/W11", title: "Related Eleven" },
+            ],
+          }),
+          { status: 200 },
+        ),
+      );
+
+    const papers = await fetchOpenAlexRecommendationsForSet({
+      apiKey: "test-key",
+      dois: ["10.1/a"],
+      limit: 1,
+      signal: undefined,
+    });
+
+    expect(papers).toHaveLength(1);
+  });
+
+  it("returns an empty array (not an error) when every seed resolves but none has related works", async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(
+      new Response(JSON.stringify({ id: "https://openalex.org/W1", related_works: [] }), { status: 200 }),
+    );
+
+    const papers = await fetchOpenAlexRecommendationsForSet({
+      apiKey: "test-key",
+      dois: ["10.1/a"],
+      limit: 10,
+      signal: undefined,
+    });
+
+    expect(papers).toEqual([]);
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("still returns whatever related works it found when only some seeds fail", async () => {
+    vi.mocked(fetch)
+      .mockResolvedValueOnce(new Response("{}", { status: 500 }))
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({ id: "https://openalex.org/W2", related_works: ["https://openalex.org/W20"] }),
+          { status: 200 },
+        ),
+      )
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ results: [{ id: "https://openalex.org/W20", title: "Related Twenty" }] }), {
+          status: 200,
+        }),
+      );
+
+    const papers = await fetchOpenAlexRecommendationsForSet({
+      apiKey: "test-key",
+      dois: ["10.1/broken", "10.1/ok"],
+      limit: 10,
+      signal: undefined,
+    });
+
+    expect(papers).toEqual([expect.objectContaining({ paper_id: "W20", title: "Related Twenty" })]);
+  });
+
+  it("throws openalex_error when every seed lookup fails, so the caller can fall back to Semantic Scholar", async () => {
+    vi.mocked(fetch)
+      .mockResolvedValueOnce(new Response("{}", { status: 500 }))
+      .mockResolvedValueOnce(new Response("{}", { status: 500 }));
+
+    await expect(
+      fetchOpenAlexRecommendationsForSet({ apiKey: "test-key", dois: ["10.1/a", "10.1/b"], limit: 10, signal: undefined }),
+    ).rejects.toMatchObject({ code: "openalex_error" });
+  });
+});
+
+describe("fetchOpenAlexPaperIdByTitle", () => {
+  beforeEach(() => {
+    vi.stubGlobal("fetch", vi.fn());
+  });
+
+  it("returns a DOI:-prefixed id when the top search result has a DOI", async () => {
+    vi.mocked(fetch).mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          results: [{ id: "https://openalex.org/W1", doi: "https://doi.org/10.1038/nature12373", title: "Match" }],
+        }),
+        { status: 200 },
+      ),
+    );
+
+    const paperId = await fetchOpenAlexPaperIdByTitle({ apiKey: "test-key", title: "some title", signal: undefined });
+
+    expect(paperId).toBe("DOI:10.1038/nature12373");
+  });
+
+  it("throws openalex_not_found when the top result has no DOI", async () => {
+    vi.mocked(fetch).mockResolvedValue(
+      new Response(JSON.stringify({ results: [{ id: "https://openalex.org/W1", title: "No DOI" }] }), { status: 200 }),
+    );
+
+    await expect(
+      fetchOpenAlexPaperIdByTitle({ apiKey: "test-key", title: "some title", signal: undefined }),
+    ).rejects.toMatchObject({ code: "openalex_not_found" });
+  });
+
+  it("throws openalex_not_found when there are no search results at all", async () => {
+    vi.mocked(fetch).mockResolvedValue(new Response(JSON.stringify({ results: [] }), { status: 200 }));
+
+    await expect(
+      fetchOpenAlexPaperIdByTitle({ apiKey: "test-key", title: "no matches", signal: undefined }),
+    ).rejects.toMatchObject({ code: "openalex_not_found" });
   });
 });
 

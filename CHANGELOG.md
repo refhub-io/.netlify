@@ -6,6 +6,33 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this
 project uses [Semantic Versioning](https://semver.org/). History prior to
 2.2.0 was not tracked in this file.
 
+## [2.4.0] - 2026-07-17
+
+### Added
+- OpenAlex fallback extended to the two routes 2.3.0 explicitly left on
+  Semantic Scholar only:
+  - `/semantic-scholar/recommendations` (and its `/related` alias) now
+    tries OpenAlex first when every seed in the batch is DOI-addressable,
+    approximating Semantic Scholar's recommendations via each seed's own
+    `related_works` (OpenAlex's own "works OpenAlex considers related to
+    this one" field), unioned and deduplicated across all seeds, then
+    falls back to Semantic Scholar on error, exhausted budget, or a batch
+    with any non-DOI seed. `src/openalex.js` gains
+    `fetchOpenAlexRecommendationsForSet`.
+  - `/semantic-scholar/lookup` with a `title` query now tries an OpenAlex
+    title search first, using the top result's DOI if it has one, falling
+    back to Semantic Scholar otherwise. `src/openalex.js` gains
+    `fetchOpenAlexPaperIdByTitle`. DOI-based lookups are unaffected — they
+    were already provider-agnostic.
+  - Both routes now report `meta.provider`, matching every other
+    OpenAlex-backed route.
+
+### Fixed
+- These two gaps were the reason vault-augment discovery could still hit
+  a hard Semantic Scholar rate limit with zero fallback, despite
+  refhub.io's What's New entry for 2.3.0 already (incorrectly) claiming
+  full OpenAlex coverage for discovery.
+
 ## [2.3.0] - 2026-07-10
 
 ### Added

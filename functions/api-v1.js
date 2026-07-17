@@ -52,9 +52,12 @@ import {
 import {
   fetchOpenAlexCitations,
   fetchOpenAlexDoiMetadata,
+  fetchOpenAlexPaperIdByTitle,
   fetchOpenAlexReferences,
+  fetchOpenAlexRecommendationsForSet,
   fetchOpenAlexSearch,
   OPENALEX_CITATIONS_COST_USD,
+  OPENALEX_RECOMMENDATIONS_COST_USD,
   OPENALEX_SEARCH_COST_USD,
   takeOpenAlexBudget,
 } from "../src/openalex.js";
@@ -836,42 +839,67 @@ async function handlePaperRecommendations(context, event, principal, supabase) {
   const { seedPaperIds, limit } = normalizedRequest.value;
   const cacheKey = `recommendations:${[...seedPaperIds].sort().join(",")}:${limit}`;
   const cached = getCachedSemanticScholarValue(cacheKey);
-  const papers = cached.hit
+  const outcome = cached.hit
     ? await cached.value
     : await (async () => {
       const config = getConfig();
-      const rateLimit = await takeSemanticScholarRateLimit(supabase, config);
-      if (!rateLimit.allowed) {
-        return json(
-          429,
-          {
-            error: {
-              code: "rate_limit_exceeded",
-              message: "Too many Semantic Scholar requests; please retry shortly",
-              details: {
-                retry_after_seconds: rateLimit.retryAfterSeconds,
-              },
-            },
-            meta: {
-              request_id: context.requestId,
-            },
-          },
-          {
-            "retry-after": String(rateLimit.retryAfterSeconds),
-          },
-        );
-      }
+      const fetchFromSemanticScholar = async () => {
+        const rateLimit = await takeSemanticScholarRateLimit(supabase, config);
+        if (!rateLimit.allowed) {
+          throw createLocalPaperRateLimitError(rateLimit.retryAfterSeconds);
+        }
 
-      const timeout = AbortSignal.timeout(config.semanticScholarTimeoutMs);
-      return getCachedSemanticScholarResponse(cacheKey, () =>
-        fetchSemanticScholarRecommendations({
+        const timeout = AbortSignal.timeout(config.semanticScholarTimeoutMs);
+        return fetchSemanticScholarRecommendations({
           apiKey: config.semanticScholarApiKey,
           seedPaperIds,
           limit,
           signal: timeout,
-        })
-      );
+        });
+      };
+
+      // OpenAlex has no seed-id format of its own to mix with Semantic
+      // Scholar's -- only DOI:-prefixed seeds are addressable there (see
+      // fetchOpenAlexRecommendationsForSet). A batch is only OpenAlex-eligible
+      // when every seed is DOI-addressable; a single non-DOI seed (e.g. a
+      // title-lookup that itself fell back to a raw Semantic Scholar id)
+      // sends the whole batch straight to Semantic Scholar, same as before.
+      const dois = seedPaperIds
+        .map((seedPaperId) => /^DOI:(.+)$/i.exec(seedPaperId)?.[1])
+        .filter(Boolean);
+
+      try {
+        return await getCachedSemanticScholarResponse(cacheKey, async () => {
+          if (!config.openalexApiKey || dois.length !== seedPaperIds.length) {
+            return { value: await fetchFromSemanticScholar(), provider: "semantic_scholar" };
+          }
+
+          const budget = await takeOpenAlexBudgetOrFallback(config, OPENALEX_RECOMMENDATIONS_COST_USD);
+          if (!budget.allowed) {
+            return { value: await fetchFromSemanticScholar(), provider: "semantic_scholar" };
+          }
+
+          const openAlexTimeout = AbortSignal.timeout(config.openalexTimeoutMs);
+          let provider;
+          const value = await withProviderFallback({
+            primary: () => fetchOpenAlexRecommendationsForSet({ apiKey: config.openalexApiKey, dois, limit, signal: openAlexTimeout }),
+            fallback: fetchFromSemanticScholar,
+            isFallbackEligible: isOpenAlexFallbackEligible,
+            onProviderUsed: (usedProvider) => {
+              provider = usedProvider;
+            },
+          });
+          return { value, provider };
+        });
+      } catch (error) {
+        if (error?.code === "local_paper_rate_limited") {
+          return { value: buildLocalPaperRateLimitResponse(error, context.requestId), provider: null };
+        }
+        throw error;
+      }
     })();
+
+  const { value: papers, provider } = outcome;
 
   if (papers?.statusCode) {
     return papers;
@@ -882,6 +910,7 @@ async function handlePaperRecommendations(context, event, principal, supabase) {
     meta: {
       request_id: context.requestId,
       paper_ids: seedPaperIds,
+      provider,
       limit,
     },
   });
@@ -924,43 +953,53 @@ async function handlePaperLookup(context, event, principal, supabase) {
 
   const cacheKey = `lookup:${queryType}:${queryValue}`;
   const cached = getCachedSemanticScholarValue(cacheKey);
-  const paperId = cached.hit
+  const outcome = cached.hit
     ? await cached.value
     : await (async () => {
       const config = getConfig();
-      const rateLimit = await takeSemanticScholarRateLimit(supabase, config);
-      if (!rateLimit.allowed) {
-        return json(
-          429,
-          {
-            error: {
-              code: "rate_limit_exceeded",
-              message: "Too many Semantic Scholar requests; please retry shortly",
-              details: {
-                retry_after_seconds: rateLimit.retryAfterSeconds,
-              },
-            },
-            meta: {
-              request_id: context.requestId,
-            },
-          },
-          {
-            "retry-after": String(rateLimit.retryAfterSeconds),
-          },
-        );
-      }
+      const fetchFromSemanticScholar = async () => {
+        const rateLimit = await takeSemanticScholarRateLimit(supabase, config);
+        if (!rateLimit.allowed) {
+          throw createLocalPaperRateLimitError(rateLimit.retryAfterSeconds);
+        }
 
-      const timeout = AbortSignal.timeout(config.semanticScholarTimeoutMs);
+        const timeout = AbortSignal.timeout(config.semanticScholarTimeoutMs);
+        return fetchSemanticScholarPaperLookup({
+          apiKey: config.semanticScholarApiKey,
+          queryType,
+          queryValue,
+          signal: timeout,
+        });
+      };
+
       try {
-        return await getCachedSemanticScholarResponse(cacheKey, () =>
-          fetchSemanticScholarPaperLookup({
-            apiKey: config.semanticScholarApiKey,
-            queryType,
-            queryValue,
-            signal: timeout,
-          })
-        );
+        return await getCachedSemanticScholarResponse(cacheKey, async () => {
+          if (!config.openalexApiKey) {
+            return { value: await fetchFromSemanticScholar(), provider: "semantic_scholar" };
+          }
+
+          const budget = await takeOpenAlexBudgetOrFallback(config, OPENALEX_SEARCH_COST_USD);
+          if (!budget.allowed) {
+            return { value: await fetchFromSemanticScholar(), provider: "semantic_scholar" };
+          }
+
+          const openAlexTimeout = AbortSignal.timeout(config.openalexTimeoutMs);
+          let provider;
+          const value = await withProviderFallback({
+            primary: () => fetchOpenAlexPaperIdByTitle({ apiKey: config.openalexApiKey, title: queryValue, signal: openAlexTimeout }),
+            fallback: fetchFromSemanticScholar,
+            isFallbackEligible: isOpenAlexFallbackEligible,
+            onProviderUsed: (usedProvider) => {
+              provider = usedProvider;
+            },
+          });
+          return { value, provider };
+        });
       } catch (error) {
+        if (error?.code === "local_paper_rate_limited") {
+          return { value: buildLocalPaperRateLimitResponse(error, context.requestId), provider: null };
+        }
+
         const stale = getStaleSemanticScholarValue(cacheKey);
         if (error?.code === "semantic_scholar_rate_limited" && stale.hit) {
           return stale.value;
@@ -969,6 +1008,8 @@ async function handlePaperLookup(context, event, principal, supabase) {
         throw error;
       }
     })();
+
+  const { value: paperId, provider } = outcome;
 
   if (paperId?.statusCode) {
     return paperId;
@@ -981,6 +1022,7 @@ async function handlePaperLookup(context, event, principal, supabase) {
     meta: {
       request_id: context.requestId,
       query_type: queryType,
+      provider,
     },
   });
 }

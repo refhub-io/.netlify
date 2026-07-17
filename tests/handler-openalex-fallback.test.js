@@ -18,6 +18,7 @@ vi.mock("../src/semantic-scholar.js", async (importOriginal) => {
     fetchSemanticScholarReferences: vi.fn(),
     fetchSemanticScholarCitations: vi.fn(),
     fetchSemanticScholarRecommendations: vi.fn(),
+    fetchSemanticScholarPaperLookup: vi.fn(),
   };
 });
 
@@ -29,6 +30,8 @@ vi.mock("../src/openalex.js", async (importOriginal) => {
     fetchOpenAlexSearch: vi.fn(),
     fetchOpenAlexReferences: vi.fn(),
     fetchOpenAlexCitations: vi.fn(),
+    fetchOpenAlexRecommendationsForSet: vi.fn(),
+    fetchOpenAlexPaperIdByTitle: vi.fn(),
     takeOpenAlexBudget: vi.fn(),
   };
 });
@@ -40,12 +43,15 @@ import {
   fetchSemanticScholarReferences,
   fetchSemanticScholarCitations,
   fetchSemanticScholarRecommendations,
+  fetchSemanticScholarPaperLookup,
 } from "../src/semantic-scholar.js";
 import {
   fetchOpenAlexDoiMetadata,
   fetchOpenAlexSearch,
   fetchOpenAlexReferences,
   fetchOpenAlexCitations,
+  fetchOpenAlexRecommendationsForSet,
+  fetchOpenAlexPaperIdByTitle,
   takeOpenAlexBudget,
 } from "../src/openalex.js";
 import { handler } from "../functions/api-v1.js";
@@ -382,23 +388,154 @@ describe("references/citations routes: DOI-prefixed paper_id triggers OpenAlex p
     expect(fetchOpenAlexCitations).not.toHaveBeenCalled();
   });
 
-  it("never calls OpenAlex for recommendations, even with a DOI:-prefixed seed", async () => {
-    vi.mocked(fetchSemanticScholarRecommendations).mockResolvedValue([{ paper_id: "rec1", title: "Rec" }]);
+});
+
+describe("recommendations route: OpenAlex primary via related_works, Semantic Scholar fallback", () => {
+  beforeEach(() => {
+    process.env.OPENALEX_API_KEY = "oa-test";
+    vi.mocked(fetchSemanticScholarRecommendations).mockReset();
+    vi.mocked(fetchOpenAlexRecommendationsForSet).mockReset();
+    vi.mocked(takeOpenAlexBudget).mockReset();
+    vi.mocked(takeOpenAlexBudget).mockResolvedValue({ allowed: true, spentUsd: 0.0005 });
+  });
+
+  // Distinct seed sets per test: the response cache is keyed off the sorted
+  // seedPaperIds, same leak risk noted above for references/citations.
+  it("tries OpenAlex related_works when every seed is DOI:-prefixed", async () => {
+    vi.mocked(fetchOpenAlexRecommendationsForSet).mockResolvedValue([{ paper_id: "W9", title: "OA Related" }]);
 
     const res = await handler(
-      makeEvent("/api/v1/semantic-scholar/related", { paper_id: "DOI:10.1038/nature12373", limit: 10 }),
+      makeEvent("/api/v1/semantic-scholar/related", {
+        paper_ids: ["DOI:10.1038/nature.rec.1"],
+        limit: 10,
+      }),
     );
 
     expect(res.statusCode).toBe(200);
-    // The recommendations route (rewritten in #27 for batched paper_ids) has
-    // its own response shape that never included a meta.provider field --
-    // unlike the other routes, it doesn't go through handleSemanticScholarPaperRoute
-    // and structurally never touches OpenAlex at all (no OPENALEX_FETCHERS_BY_ROUTE
-    // entry for "recommendations"), so there's no provider to report.
-    expect(JSON.parse(res.body).meta.provider).toBeUndefined();
-    expect(fetchOpenAlexReferences).not.toHaveBeenCalled();
-    expect(fetchOpenAlexCitations).not.toHaveBeenCalled();
-    expect(fetchSemanticScholarRecommendations).toHaveBeenCalledTimes(1);
+    expect(JSON.parse(res.body).data[0].paper_id).toBe("W9");
+    expect(JSON.parse(res.body).meta.provider).toBe("openalex");
+    expect(fetchOpenAlexRecommendationsForSet).toHaveBeenCalledWith(
+      expect.objectContaining({ dois: ["10.1038/nature.rec.1"], limit: 10 }),
+    );
+    expect(fetchSemanticScholarRecommendations).not.toHaveBeenCalled();
+  });
+
+  it("falls back to Semantic Scholar recommendations when OpenAlex fails", async () => {
+    vi.mocked(fetchOpenAlexRecommendationsForSet).mockRejectedValue(
+      Object.assign(new Error("upstream error"), { code: "openalex_error" }),
+    );
+    vi.mocked(fetchSemanticScholarRecommendations).mockResolvedValue([{ paper_id: "rec2", title: "SS Rec" }]);
+
+    const res = await handler(
+      makeEvent("/api/v1/semantic-scholar/related", {
+        paper_ids: ["DOI:10.1038/nature.rec.2"],
+        limit: 10,
+      }),
+    );
+
+    expect(res.statusCode).toBe(200);
+    expect(JSON.parse(res.body).data[0].paper_id).toBe("rec2");
+    expect(JSON.parse(res.body).meta.provider).toBe("semantic_scholar");
+  });
+
+  it("goes straight to Semantic Scholar when any seed is not DOI:-prefixed", async () => {
+    vi.mocked(fetchSemanticScholarRecommendations).mockResolvedValue([{ paper_id: "rec3", title: "SS Only" }]);
+
+    const res = await handler(
+      makeEvent("/api/v1/semantic-scholar/related", {
+        paper_ids: ["DOI:10.1038/nature.rec.3", "abc123hash"],
+        limit: 10,
+      }),
+    );
+
+    expect(res.statusCode).toBe(200);
+    expect(JSON.parse(res.body).meta.provider).toBe("semantic_scholar");
+    expect(fetchOpenAlexRecommendationsForSet).not.toHaveBeenCalled();
+  });
+
+  it("skips OpenAlex recommendations when the budget would be exceeded", async () => {
+    vi.mocked(takeOpenAlexBudget).mockResolvedValue({ allowed: false, spentUsd: 1.0 });
+    vi.mocked(fetchSemanticScholarRecommendations).mockResolvedValue([{ paper_id: "rec4", title: "SS Rec" }]);
+
+    const res = await handler(
+      makeEvent("/api/v1/semantic-scholar/related", {
+        paper_ids: ["DOI:10.1038/nature.rec.4"],
+        limit: 10,
+      }),
+    );
+
+    expect(res.statusCode).toBe(200);
+    expect(JSON.parse(res.body).meta.provider).toBe("semantic_scholar");
+    expect(fetchOpenAlexRecommendationsForSet).not.toHaveBeenCalled();
+  });
+
+  it("falls back to Semantic Scholar instead of a 500 when the budget RPC itself throws", async () => {
+    vi.mocked(takeOpenAlexBudget).mockRejectedValue(new Error("relation take_openalex_budget does not exist"));
+    vi.mocked(fetchSemanticScholarRecommendations).mockResolvedValue([{ paper_id: "rec5", title: "SS Rec" }]);
+
+    const res = await handler(
+      makeEvent("/api/v1/semantic-scholar/related", {
+        paper_ids: ["DOI:10.1038/nature.rec.5"],
+        limit: 10,
+      }),
+    );
+
+    expect(res.statusCode).toBe(200);
+    expect(JSON.parse(res.body).meta.provider).toBe("semantic_scholar");
+    expect(fetchOpenAlexRecommendationsForSet).not.toHaveBeenCalled();
+  });
+});
+
+describe("lookup route (title query): OpenAlex primary, Semantic Scholar fallback", () => {
+  beforeEach(() => {
+    process.env.OPENALEX_API_KEY = "oa-test";
+    vi.mocked(fetchSemanticScholarPaperLookup).mockReset();
+    vi.mocked(fetchOpenAlexPaperIdByTitle).mockReset();
+    vi.mocked(takeOpenAlexBudget).mockReset();
+    vi.mocked(takeOpenAlexBudget).mockResolvedValue({ allowed: true, spentUsd: 0.001 });
+  });
+
+  // Distinct titles per test: the response cache is keyed off
+  // `lookup:title:${queryValue}`, same leak risk noted above.
+  it("tries OpenAlex title search first and returns a DOI:-prefixed id", async () => {
+    vi.mocked(fetchOpenAlexPaperIdByTitle).mockResolvedValue("DOI:10.1038/nature.title.1");
+
+    const res = await handler(
+      makeEvent("/api/v1/semantic-scholar/lookup", { title: "Deep learning title one" }),
+    );
+
+    expect(res.statusCode).toBe(200);
+    expect(JSON.parse(res.body).data.paper_id).toBe("DOI:10.1038/nature.title.1");
+    expect(JSON.parse(res.body).meta.provider).toBe("openalex");
+    expect(fetchSemanticScholarPaperLookup).not.toHaveBeenCalled();
+  });
+
+  it("falls back to Semantic Scholar when OpenAlex has no DOI-addressable match", async () => {
+    vi.mocked(fetchOpenAlexPaperIdByTitle).mockRejectedValue(
+      Object.assign(new Error("not found"), { code: "openalex_not_found" }),
+    );
+    vi.mocked(fetchSemanticScholarPaperLookup).mockResolvedValue("ss-title-paper-2");
+
+    const res = await handler(
+      makeEvent("/api/v1/semantic-scholar/lookup", { title: "Deep learning title two" }),
+    );
+
+    expect(res.statusCode).toBe(200);
+    expect(JSON.parse(res.body).data.paper_id).toBe("ss-title-paper-2");
+    expect(JSON.parse(res.body).meta.provider).toBe("semantic_scholar");
+  });
+
+  it("skips OpenAlex title lookup when the budget would be exceeded", async () => {
+    vi.mocked(takeOpenAlexBudget).mockResolvedValue({ allowed: false, spentUsd: 1.0 });
+    vi.mocked(fetchSemanticScholarPaperLookup).mockResolvedValue("ss-title-paper-3");
+
+    const res = await handler(
+      makeEvent("/api/v1/semantic-scholar/lookup", { title: "Deep learning title three" }),
+    );
+
+    expect(res.statusCode).toBe(200);
+    expect(JSON.parse(res.body).meta.provider).toBe("semantic_scholar");
+    expect(fetchOpenAlexPaperIdByTitle).not.toHaveBeenCalled();
   });
 });
 

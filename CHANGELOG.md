@@ -6,6 +6,16 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this
 project uses [Semantic Versioning](https://semver.org/). History prior to
 2.2.0 was not tracked in this file.
 
+## [2.5.0] - 2026-07-21
+
+### Added
+- `reading_state` (`unread` / `skimmed` / `read`) and `important` (boolean)
+  are now part of the publication field set: accepted on
+  `POST /vaults/:vaultId/items` and `PATCH /vaults/:vaultId/items/:itemId`,
+  and returned on every route that selects `VAULT_PUBLICATION_SELECT`. Both
+  fields match refhub.io's v1.7.0 frontend release (issue #94) — vault-local
+  per item, like `notes`, and never part of the bibliographic rollup.
+
 ## [2.4.0] - 2026-07-17
 
 ### Added

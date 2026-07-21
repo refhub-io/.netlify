@@ -141,6 +141,8 @@ const PUBLICATION_FIELDS = [
   "isbn",
   "issn",
   "keywords",
+  "reading_state",
+  "important",
 ];
 
 const VAULT_SELECT =

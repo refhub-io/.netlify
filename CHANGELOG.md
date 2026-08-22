@@ -6,6 +6,16 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this
 project uses [Semantic Versioning](https://semver.org/). History prior to
 2.2.0 was not tracked in this file.
 
+## [2.5.1] - 2026-08-22
+
+### Fixed
+- `DELETE /api/v1/keys/:keyId` now permanently deletes an API key owned by the
+  authenticated management user instead of acting as an alias for soft revoke.
+  This keeps key deletion persistent in management clients: deleted keys no
+  longer reappear after reloading the key list.
+- API-key management routes still require a Supabase session JWT; RefHub API
+  keys remain rejected for create, revoke, and delete management actions.
+
 ## [2.5.0] - 2026-07-21
 
 ### Added

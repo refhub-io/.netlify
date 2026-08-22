@@ -825,6 +825,36 @@ async function handleRevokeApiKey(supabase, principal, context, keyId) {
   });
 }
 
+async function handleDeleteApiKey(supabase, principal, context, keyId) {
+  const existingKey = await fetchManagedApiKey(supabase, keyId, principal.userId);
+  if (!existingKey) {
+    return errorResponse(404, "api_key_not_found", "API key not found", context.requestId);
+  }
+
+  const deleteResult = await supabase
+    .from("api_keys")
+    .delete({ count: "exact" })
+    .eq("id", keyId)
+    .eq("owner_user_id", principal.userId);
+
+  if (deleteResult.error) {
+    throw deleteResult.error;
+  }
+
+  if (deleteResult.count === 0) {
+    return errorResponse(404, "api_key_not_found", "API key not found", context.requestId);
+  }
+
+  return json(200, {
+    data: {
+      id: keyId,
+    },
+    meta: {
+      request_id: context.requestId,
+    },
+  });
+}
+
 async function handlePaperRecommendations(context, event, principal, supabase) {
   const scopeError = ensureSemanticScholarReadScope(principal, context);
   if (scopeError) return scopeError;
@@ -2245,7 +2275,7 @@ export async function handler(event) {
       } else if (route.length === 1 && route[0] === "keys" && event.httpMethod === "POST") {
         response = await handleCreateApiKey(supabase, principal, context, event);
       } else if (route.length === 2 && route[0] === "keys" && event.httpMethod === "DELETE") {
-        response = await handleRevokeApiKey(supabase, principal, context, route[1]);
+        response = await handleDeleteApiKey(supabase, principal, context, route[1]);
       } else if (route.length === 3 && route[0] === "keys" && route[2] === "revoke" && event.httpMethod === "POST") {
         response = await handleRevokeApiKey(supabase, principal, context, route[1]);
       } else if (route.length === 1 && route[0] === "google-drive" && event.httpMethod === "GET") {

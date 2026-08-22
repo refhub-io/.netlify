@@ -1,8 +1,8 @@
-# refhub api v1
+# refhub api
 
 > // netlify_functions backend for refhub.io
 
-versioned api backend for api-key access to refhub vaults. single function entrypoint dispatched by path segment. reads and writes the existing refhub data model directly — no parallel store.
+versioned `/api/v1` backend for api-key access to refhub vaults. single function entrypoint dispatched by path segment. reads and writes the existing refhub data model directly — no parallel store.
 
 ---
 
@@ -266,9 +266,13 @@ rules:
 - `vault_ids` optional; every vault must be accessible to the authenticated user
 - response returns plaintext key once as `secret` — only the hash is stored
 
-### `POST /api/v1/keys/:keyId/revoke` · `DELETE /api/v1/keys/:keyId`
+### `POST /api/v1/keys/:keyId/revoke`
 
 auth: supabase session jwt. revokes a key owned by the authenticated user. record is soft-revoked via `revoked_at` — not deleted from storage.
+
+### `DELETE /api/v1/keys/:keyId`
+
+auth: supabase session jwt. permanently deletes a key owned by the authenticated user. deleting an active key removes the stored credential record, so it can no longer authenticate and no longer appears in key-management lists.
 
 ### `POST /api/v1/recommendations` · `POST /api/v1/references` · `POST /api/v1/citations`
 

@@ -333,7 +333,7 @@ If the client loses the secret, create a new key.
 
 ### Revoke API key
 
-Primary revoke route:
+Soft-revokes the key. The record remains visible in management lists with `revoked_at` set, but the key can no longer authenticate.
 
 ```bash
 curl -s \
@@ -342,7 +342,9 @@ curl -s \
   https://refhub-api.netlify.app/api/v1/keys/<KEY_ID>/revoke
 ```
 
-Alias route:
+### Delete API key
+
+Permanently removes the key record owned by the authenticated user. Deleting an active key also makes it unusable because the stored credential record is gone.
 
 ```bash
 curl -s \
@@ -350,8 +352,6 @@ curl -s \
   -H "Authorization: Bearer $JWT" \
   https://refhub-api.netlify.app/api/v1/keys/<KEY_ID>
 ```
-
-Revocation is soft-delete style: the record remains, but `revoked_at` is set and the key can no longer authenticate.
 
 ---
 

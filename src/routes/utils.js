@@ -40,6 +40,8 @@ export const PUBLICATION_FIELDS = [
   "isbn",
   "issn",
   "keywords",
+  "reading_state",
+  "important",
 ];
 
 export const VAULT_PUBLICATION_SELECT = [

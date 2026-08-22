@@ -23,6 +23,18 @@ describe("pickPublicationFields", () => {
     expect(result.authors).toEqual(["Alice"]);
     expect(result.publication_type).toBe("book");
   });
+
+  it("passes through reading_state and important when provided", () => {
+    const result = pickPublicationFields({ title: "T", reading_state: "read", important: true });
+    expect(result.reading_state).toBe("read");
+    expect(result.important).toBe(true);
+  });
+
+  it("omits reading_state and important when absent, letting the DB column default apply", () => {
+    const result = pickPublicationFields({ title: "T" });
+    expect(result.reading_state).toBeUndefined();
+    expect(result.important).toBeUndefined();
+  });
 });
 
 describe("validateVaultTagIds", () => {

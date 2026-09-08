@@ -8,7 +8,7 @@
  *   POST   /api/v1/vaults/:vaultId/items/import-preview   handleImportPreview
  */
 
-import { API_SCOPES, requireScope, resolveVaultAccess } from "../auth.js";
+import { API_SCOPES, requireScope, resolveVaultAccess, vaultAccessErrorMessage } from "../auth.js";
 import { json, errorResponse, parseJsonBody } from "../http.js";
 import { getConfig } from "../config.js";
 import {
@@ -32,7 +32,7 @@ export async function handleGetItem(supabase, principal, context, vaultId, itemI
 
   const access = await resolveVaultAccess(supabase, principal, vaultId, "viewer");
   if (!access.ok) {
-    return errorResponse(access.status, access.code, "Vault access denied", context.requestId);
+    return errorResponse(access.status, access.code, vaultAccessErrorMessage(access.code), context.requestId);
   }
 
   const { data: item, error } = await supabase
@@ -62,7 +62,7 @@ export async function handleDeleteItem(supabase, principal, context, vaultId, it
 
   const access = await resolveVaultAccess(supabase, principal, vaultId, "editor");
   if (!access.ok) {
-    return errorResponse(access.status, access.code, "Vault access denied", context.requestId);
+    return errorResponse(access.status, access.code, vaultAccessErrorMessage(access.code), context.requestId);
   }
 
   const { data: existing, error: findError } = await supabase
@@ -113,7 +113,7 @@ export async function handleBulkUpsertItems(supabase, principal, context, vaultI
 
   const access = await resolveVaultAccess(supabase, principal, vaultId, "editor");
   if (!access.ok) {
-    return errorResponse(access.status, access.code, "Vault access denied", context.requestId);
+    return errorResponse(access.status, access.code, vaultAccessErrorMessage(access.code), context.requestId);
   }
 
   const { maxBulkItems } = getConfig();
@@ -244,7 +244,7 @@ export async function handleImportPreview(supabase, principal, context, vaultId,
 
   const access = await resolveVaultAccess(supabase, principal, vaultId, "viewer");
   if (!access.ok) {
-    return errorResponse(access.status, access.code, "Vault access denied", context.requestId);
+    return errorResponse(access.status, access.code, vaultAccessErrorMessage(access.code), context.requestId);
   }
 
   const parsed = parseJsonBody(event);

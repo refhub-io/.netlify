@@ -244,6 +244,7 @@ describe("handleArchiveVault", () => {
 
     expect(res.statusCode).toBe(409);
     expect(parseBody(res).error.code).toBe("vault_archived");
+    expect(parseBody(res).error.message).toBe("This vault is archived and is permanently read-only");
   });
 
   it("returns 200 on a non-archived vault", async () => {

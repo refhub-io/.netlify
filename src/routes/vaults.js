@@ -13,7 +13,7 @@
  *   DELETE /api/v1/vaults/:vaultId/shares/:shareId     handleDeleteVaultShare
  */
 
-import { API_SCOPES, requireScope, resolveVaultAccess } from "../auth.js";
+import { API_SCOPES, requireScope, resolveVaultAccess, vaultAccessErrorMessage } from "../auth.js";
 import { json, errorResponse, parseJsonBody } from "../http.js";
 import { VAULT_SELECT } from "./utils.js";
 
@@ -77,7 +77,7 @@ export async function handleUpdateVault(supabase, principal, context, vaultId, e
 
   const access = await resolveVaultAccess(supabase, principal, vaultId, "owner");
   if (!access.ok) {
-    return errorResponse(access.status, access.code, "Vault access denied", context.requestId);
+    return errorResponse(access.status, access.code, vaultAccessErrorMessage(access.code), context.requestId);
   }
 
   const parsed = parseJsonBody(event);
@@ -125,7 +125,7 @@ export async function handleDeleteVault(supabase, principal, context, vaultId) {
   // exception to that rule.
   const access = await resolveVaultAccess(supabase, principal, vaultId, "owner", { allowArchived: true });
   if (!access.ok) {
-    return errorResponse(access.status, access.code, "Vault access denied", context.requestId);
+    return errorResponse(access.status, access.code, vaultAccessErrorMessage(access.code), context.requestId);
   }
 
   const { error } = await supabase.from("vaults").delete().eq("id", vaultId);
@@ -148,7 +148,7 @@ export async function handleArchiveVault(supabase, principal, context, vaultId) 
   // There is no unarchive route -- archiving is permanent.
   const access = await resolveVaultAccess(supabase, principal, vaultId, "owner");
   if (!access.ok) {
-    return errorResponse(access.status, access.code, "Vault access denied", context.requestId);
+    return errorResponse(access.status, access.code, vaultAccessErrorMessage(access.code), context.requestId);
   }
 
   const { data: vault, error } = await supabase
@@ -174,7 +174,7 @@ export async function handleUpdateVaultVisibility(supabase, principal, context, 
 
   const access = await resolveVaultAccess(supabase, principal, vaultId, "owner");
   if (!access.ok) {
-    return errorResponse(access.status, access.code, "Vault access denied", context.requestId);
+    return errorResponse(access.status, access.code, vaultAccessErrorMessage(access.code), context.requestId);
   }
 
   const parsed = parseJsonBody(event);
@@ -231,7 +231,7 @@ export async function handleListVaultShares(supabase, principal, context, vaultI
 
   const access = await resolveVaultAccess(supabase, principal, vaultId, "viewer");
   if (!access.ok) {
-    return errorResponse(access.status, access.code, "Vault access denied", context.requestId);
+    return errorResponse(access.status, access.code, vaultAccessErrorMessage(access.code), context.requestId);
   }
 
   const { data, error } = await supabase
@@ -255,7 +255,7 @@ export async function handleCreateVaultShare(supabase, principal, context, vault
 
   const access = await resolveVaultAccess(supabase, principal, vaultId, "owner");
   if (!access.ok) {
-    return errorResponse(access.status, access.code, "Vault access denied", context.requestId);
+    return errorResponse(access.status, access.code, vaultAccessErrorMessage(access.code), context.requestId);
   }
 
   const parsed = parseJsonBody(event);
@@ -308,7 +308,7 @@ export async function handleUpdateVaultShare(supabase, principal, context, vault
 
   const access = await resolveVaultAccess(supabase, principal, vaultId, "owner");
   if (!access.ok) {
-    return errorResponse(access.status, access.code, "Vault access denied", context.requestId);
+    return errorResponse(access.status, access.code, vaultAccessErrorMessage(access.code), context.requestId);
   }
 
   const parsed = parseJsonBody(event);
@@ -345,7 +345,7 @@ export async function handleDeleteVaultShare(supabase, principal, context, vault
 
   const access = await resolveVaultAccess(supabase, principal, vaultId, "owner");
   if (!access.ok) {
-    return errorResponse(access.status, access.code, "Vault access denied", context.requestId);
+    return errorResponse(access.status, access.code, vaultAccessErrorMessage(access.code), context.requestId);
   }
 
   const { error } = await supabase

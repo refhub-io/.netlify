@@ -10,7 +10,7 @@
  * proxy — that would be circular from the backend).
  */
 
-import { API_SCOPES, requireScope, resolveVaultAccess } from "../auth.js";
+import { API_SCOPES, requireScope, resolveVaultAccess, vaultAccessErrorMessage } from "../auth.js";
 import { json, errorResponse, parseJsonBody } from "../http.js";
 import { getConfig } from "../config.js";
 import { parseBibtex } from "../bibtex.js";
@@ -182,7 +182,7 @@ export async function handleImportDoi(supabase, principal, context, vaultId, eve
 
   const access = await resolveVaultAccess(supabase, principal, vaultId, "editor");
   if (!access.ok) {
-    return errorResponse(access.status, access.code, "Vault access denied", context.requestId);
+    return errorResponse(access.status, access.code, vaultAccessErrorMessage(access.code), context.requestId);
   }
 
   const parsed = parseJsonBody(event);
@@ -220,7 +220,7 @@ export async function handleImportBibtex(supabase, principal, context, vaultId, 
 
   const access = await resolveVaultAccess(supabase, principal, vaultId, "editor");
   if (!access.ok) {
-    return errorResponse(access.status, access.code, "Vault access denied", context.requestId);
+    return errorResponse(access.status, access.code, vaultAccessErrorMessage(access.code), context.requestId);
   }
 
   const parsed = parseJsonBody(event);
@@ -281,7 +281,7 @@ export async function handleImportUrl(supabase, principal, context, vaultId, eve
 
   const access = await resolveVaultAccess(supabase, principal, vaultId, "editor");
   if (!access.ok) {
-    return errorResponse(access.status, access.code, "Vault access denied", context.requestId);
+    return errorResponse(access.status, access.code, vaultAccessErrorMessage(access.code), context.requestId);
   }
 
   const parsed = parseJsonBody(event);

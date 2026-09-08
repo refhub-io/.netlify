@@ -8,7 +8,7 @@
  *   GET /api/v1/vaults/:vaultId/changes  handleGetVaultChanges
  */
 
-import { API_SCOPES, requireScope, resolveVaultAccess } from "../auth.js";
+import { API_SCOPES, requireScope, resolveVaultAccess, vaultAccessErrorMessage } from "../auth.js";
 import { json, errorResponse } from "../http.js";
 import { VAULT_PUBLICATION_SELECT } from "./utils.js";
 
@@ -23,7 +23,7 @@ export async function handleSearchItems(supabase, principal, context, vaultId, e
 
   const access = await resolveVaultAccess(supabase, principal, vaultId, "viewer");
   if (!access.ok) {
-    return errorResponse(access.status, access.code, "Vault access denied", context.requestId);
+    return errorResponse(access.status, access.code, vaultAccessErrorMessage(access.code), context.requestId);
   }
 
   const params = (event && event.queryStringParameters) || {};
@@ -118,7 +118,7 @@ export async function handleGetVaultStats(supabase, principal, context, vaultId)
 
   const access = await resolveVaultAccess(supabase, principal, vaultId, "viewer");
   if (!access.ok) {
-    return errorResponse(access.status, access.code, "Vault access denied", context.requestId);
+    return errorResponse(access.status, access.code, vaultAccessErrorMessage(access.code), context.requestId);
   }
 
   const [itemsResult, tagsResult, pubIdsResult] = await Promise.all([
@@ -177,7 +177,7 @@ export async function handleGetVaultChanges(supabase, principal, context, vaultI
 
   const access = await resolveVaultAccess(supabase, principal, vaultId, "viewer");
   if (!access.ok) {
-    return errorResponse(access.status, access.code, "Vault access denied", context.requestId);
+    return errorResponse(access.status, access.code, vaultAccessErrorMessage(access.code), context.requestId);
   }
 
   const params = (event && event.queryStringParameters) || {};

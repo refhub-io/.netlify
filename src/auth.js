@@ -240,3 +240,15 @@ export async function resolveVaultAccess(
 
   return { ok: true, vault, permission };
 }
+
+/**
+ * Maps a resolveVaultAccess() failure code to a specific, accurate message.
+ * "Vault access denied" is wrong for vault_archived -- the caller has full
+ * access, the vault is just frozen -- and for vault_not_found, which isn't
+ * an access problem at all.
+ */
+export function vaultAccessErrorMessage(code) {
+  if (code === "vault_not_found") return "Vault not found";
+  if (code === "vault_archived") return "This vault is archived and is permanently read-only";
+  return "Vault access denied";
+}

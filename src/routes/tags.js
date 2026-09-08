@@ -13,7 +13,7 @@
  * updated_at reflects the latest tag change.
  */
 
-import { API_SCOPES, requireScope, resolveVaultAccess } from "../auth.js";
+import { API_SCOPES, requireScope, resolveVaultAccess, vaultAccessErrorMessage } from "../auth.js";
 import { json, errorResponse, parseJsonBody } from "../http.js";
 import { touchVaultUpdatedAt, validateVaultTagIds } from "./utils.js";
 
@@ -26,7 +26,7 @@ export async function handleListTags(supabase, principal, context, vaultId) {
 
   const access = await resolveVaultAccess(supabase, principal, vaultId, "viewer");
   if (!access.ok) {
-    return errorResponse(access.status, access.code, "Vault access denied", context.requestId);
+    return errorResponse(access.status, access.code, vaultAccessErrorMessage(access.code), context.requestId);
   }
 
   const { data, error } = await supabase
@@ -50,7 +50,7 @@ export async function handleCreateTag(supabase, principal, context, vaultId, eve
 
   const access = await resolveVaultAccess(supabase, principal, vaultId, "editor");
   if (!access.ok) {
-    return errorResponse(access.status, access.code, "Vault access denied", context.requestId);
+    return errorResponse(access.status, access.code, vaultAccessErrorMessage(access.code), context.requestId);
   }
 
   const parsed = parseJsonBody(event);
@@ -89,7 +89,7 @@ export async function handleUpdateTag(supabase, principal, context, vaultId, tag
 
   const access = await resolveVaultAccess(supabase, principal, vaultId, "editor");
   if (!access.ok) {
-    return errorResponse(access.status, access.code, "Vault access denied", context.requestId);
+    return errorResponse(access.status, access.code, vaultAccessErrorMessage(access.code), context.requestId);
   }
 
   const parsed = parseJsonBody(event);
@@ -139,7 +139,7 @@ export async function handleDeleteTag(supabase, principal, context, vaultId, tag
 
   const access = await resolveVaultAccess(supabase, principal, vaultId, "editor");
   if (!access.ok) {
-    return errorResponse(access.status, access.code, "Vault access denied", context.requestId);
+    return errorResponse(access.status, access.code, vaultAccessErrorMessage(access.code), context.requestId);
   }
 
   const { error } = await supabase.from("tags").delete().eq("id", tagId).eq("vault_id", vaultId);
@@ -160,7 +160,7 @@ export async function handleAttachTags(supabase, principal, context, vaultId, ev
 
   const access = await resolveVaultAccess(supabase, principal, vaultId, "editor");
   if (!access.ok) {
-    return errorResponse(access.status, access.code, "Vault access denied", context.requestId);
+    return errorResponse(access.status, access.code, vaultAccessErrorMessage(access.code), context.requestId);
   }
 
   const parsed = parseJsonBody(event);
@@ -215,7 +215,7 @@ export async function handleDetachTags(supabase, principal, context, vaultId, ev
 
   const access = await resolveVaultAccess(supabase, principal, vaultId, "editor");
   if (!access.ok) {
-    return errorResponse(access.status, access.code, "Vault access denied", context.requestId);
+    return errorResponse(access.status, access.code, vaultAccessErrorMessage(access.code), context.requestId);
   }
 
   const parsed = parseJsonBody(event);

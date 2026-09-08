@@ -12,7 +12,7 @@
  * checking that the source publication belongs to the vault before acting.
  */
 
-import { API_SCOPES, requireScope, resolveVaultAccess } from "../auth.js";
+import { API_SCOPES, requireScope, resolveVaultAccess, vaultAccessErrorMessage } from "../auth.js";
 import { json, errorResponse, parseJsonBody } from "../http.js";
 import { touchVaultUpdatedAt } from "./utils.js";
 
@@ -25,7 +25,7 @@ export async function handleListRelations(supabase, principal, context, vaultId,
 
   const access = await resolveVaultAccess(supabase, principal, vaultId, "viewer");
   if (!access.ok) {
-    return errorResponse(access.status, access.code, "Vault access denied", context.requestId);
+    return errorResponse(access.status, access.code, vaultAccessErrorMessage(access.code), context.requestId);
   }
 
   // Collect all vault publication IDs to build the OR filter
@@ -71,7 +71,7 @@ export async function handleCreateRelation(supabase, principal, context, vaultId
 
   const access = await resolveVaultAccess(supabase, principal, vaultId, "editor");
   if (!access.ok) {
-    return errorResponse(access.status, access.code, "Vault access denied", context.requestId);
+    return errorResponse(access.status, access.code, vaultAccessErrorMessage(access.code), context.requestId);
   }
 
   const parsed = parseJsonBody(event);
@@ -144,7 +144,7 @@ export async function handleUpdateRelation(supabase, principal, context, vaultId
 
   const access = await resolveVaultAccess(supabase, principal, vaultId, "editor");
   if (!access.ok) {
-    return errorResponse(access.status, access.code, "Vault access denied", context.requestId);
+    return errorResponse(access.status, access.code, vaultAccessErrorMessage(access.code), context.requestId);
   }
 
   const parsed = parseJsonBody(event);
@@ -201,7 +201,7 @@ export async function handleDeleteRelation(supabase, principal, context, vaultId
 
   const access = await resolveVaultAccess(supabase, principal, vaultId, "editor");
   if (!access.ok) {
-    return errorResponse(access.status, access.code, "Vault access denied", context.requestId);
+    return errorResponse(access.status, access.code, vaultAccessErrorMessage(access.code), context.requestId);
   }
 
   // Fetch the relation and verify vault ownership

@@ -8,6 +8,7 @@ import {
   isValidApiKeyScope,
   requireScope,
   resolveVaultAccess,
+  vaultAccessErrorMessage,
 } from "../src/auth.js";
 import { getConfig } from "../src/config.js";
 import { serializeVaultExport } from "../src/export.js";
@@ -1513,7 +1514,7 @@ async function handleReadVault(supabase, principal, context, vaultId) {
 
   const access = await resolveVaultAccess(supabase, principal, vaultId, "viewer");
   if (!access.ok) {
-    const message = access.code === "vault_not_found" ? "Vault not found" : "Vault access denied";
+    const message = vaultAccessErrorMessage(access.code);
     return errorResponse(access.status, access.code, message, context.requestId);
   }
 
@@ -1564,7 +1565,7 @@ async function handleAddItems(supabase, principal, context, vaultId, event) {
 
   const access = await resolveVaultAccess(supabase, principal, vaultId, "editor");
   if (!access.ok) {
-    return errorResponse(access.status, access.code, "Vault write access denied", context.requestId);
+    return errorResponse(access.status, access.code, vaultAccessErrorMessage(access.code), context.requestId);
   }
 
   const parsedBody = parseJsonBody(event);
@@ -1742,7 +1743,7 @@ async function handleUploadItemPdf(supabase, principal, context, event, vaultId,
 
   const access = await resolveVaultAccess(supabase, principal, vaultId, "editor");
   if (!access.ok) {
-    return errorResponse(access.status, access.code, "Vault write access denied", context.requestId);
+    return errorResponse(access.status, access.code, vaultAccessErrorMessage(access.code), context.requestId);
   }
 
   const { data: vaultPub, error: vpError } = await supabase
@@ -1879,7 +1880,7 @@ async function handleCreatePdfDriveSession(supabase, principal, context, vaultId
 
   const access = await resolveVaultAccess(supabase, principal, vaultId, "editor");
   if (!access.ok) {
-    return errorResponse(access.status, access.code, "Vault write access denied", context.requestId);
+    return errorResponse(access.status, access.code, vaultAccessErrorMessage(access.code), context.requestId);
   }
 
   const { data: vaultPub, error: vpError } = await supabase
@@ -1913,7 +1914,7 @@ async function handleCompletePdfDriveUpload(supabase, principal, context, event,
 
   const access = await resolveVaultAccess(supabase, principal, vaultId, "editor");
   if (!access.ok) {
-    return errorResponse(access.status, access.code, "Vault write access denied", context.requestId);
+    return errorResponse(access.status, access.code, vaultAccessErrorMessage(access.code), context.requestId);
   }
 
   const { data: vaultPub, error: vpError } = await supabase
@@ -2065,7 +2066,7 @@ async function handleUpdateItem(supabase, principal, context, vaultId, itemId, e
 
   const access = await resolveVaultAccess(supabase, principal, vaultId, "editor");
   if (!access.ok) {
-    return errorResponse(access.status, access.code, "Vault write access denied", context.requestId);
+    return errorResponse(access.status, access.code, vaultAccessErrorMessage(access.code), context.requestId);
   }
 
   const parsedBody = parseJsonBody(event);
@@ -2170,7 +2171,7 @@ async function handleExportVault(supabase, principal, context, vaultId, event) {
 
   const access = await resolveVaultAccess(supabase, principal, vaultId, "viewer");
   if (!access.ok) {
-    return errorResponse(access.status, access.code, "Vault export access denied", context.requestId);
+    return errorResponse(access.status, access.code, vaultAccessErrorMessage(access.code), context.requestId);
   }
 
   const format = event.queryStringParameters?.format || "json";

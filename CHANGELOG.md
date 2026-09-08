@@ -14,6 +14,7 @@ project uses [Semantic Versioning](https://semver.org/). History prior to
 
 ### Changed
 - `resolveVaultAccess()` now rejects any `editor`/`owner`-level permission check against an archived vault with `409 vault_archived`. `viewer`-level checks are unaffected — archived vaults remain fully readable per their existing visibility. This applies to every write route that funnels through `resolveVaultAccess` (vaults, items, tags, relations, import, PDF upload, shares) with one deliberate exception: `DELETE /api/v1/vaults/:vaultId` still succeeds on an archived vault, since the owner can delete an archived vault outright.
+- Every `resolveVaultAccess()` failure across all 30 call sites now returns a message specific to its actual code (`vault_archived` → "This vault is archived and is permanently read-only", `vault_not_found` → "Vault not found") instead of a generic "Vault access denied" / "Vault write access denied" / "Vault export access denied" that was actively misleading for `vault_archived` — the caller has full access, the vault is just frozen.
 
 ## [2.5.1] - 2026-08-22
 

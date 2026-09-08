@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { API_SCOPES, isValidApiKeyScope, requireScope, resolveVaultAccess } from "../src/auth.js";
+import { API_SCOPES, isValidApiKeyScope, requireScope, resolveVaultAccess, vaultAccessErrorMessage } from "../src/auth.js";
 import { makeMockSupabase, makeApiKeyPrincipal, makeMockVault } from "./helpers.js";
 
 describe("API_SCOPES", () => {
@@ -92,5 +92,20 @@ describe("resolveVaultAccess — archived vaults", () => {
     const access = await resolveVaultAccess(makeSupabaseForVault(vault), makeApiKeyPrincipal(), vault.id, "owner");
 
     expect(access.ok).toBe(true);
+  });
+});
+
+describe("vaultAccessErrorMessage", () => {
+  it("gives a specific message for vault_archived, distinct from a real access problem", () => {
+    expect(vaultAccessErrorMessage("vault_archived")).toBe("This vault is archived and is permanently read-only");
+  });
+
+  it("gives a specific message for vault_not_found", () => {
+    expect(vaultAccessErrorMessage("vault_not_found")).toBe("Vault not found");
+  });
+
+  it("falls back to a generic message for every other code", () => {
+    expect(vaultAccessErrorMessage("insufficient_vault_access")).toBe("Vault access denied");
+    expect(vaultAccessErrorMessage("vault_not_allowed")).toBe("Vault access denied");
   });
 });

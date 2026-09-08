@@ -142,6 +142,7 @@ export function makeMockVault(overrides = {}) {
     created_at: "2025-01-01T00:00:00Z",
     updated_at: "2025-01-01T00:00:00Z",
     visibility: overrides.visibility ?? "private",
+    archived_at: overrides.archived_at ?? null,
   };
 }
 

@@ -27,7 +27,9 @@ function parsePaginationParams(params) {
 
 export async function handleListVaultAudit(supabase, principal, context, vaultId, event) {
   // No scope guard — vault owner access is sufficient
-  const access = await resolveVaultAccess(supabase, principal, vaultId, "owner");
+  // allowArchived: this is a read (gated at owner level for privacy, not
+  // because it writes anything) -- archived vaults must stay fully readable.
+  const access = await resolveVaultAccess(supabase, principal, vaultId, "owner", { allowArchived: true });
   if (!access.ok) {
     return errorResponse(access.status, access.code, "Vault access denied", context.requestId);
   }

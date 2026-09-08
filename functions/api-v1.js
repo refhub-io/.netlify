@@ -68,6 +68,7 @@ import {
   handleCreateVault,
   handleUpdateVault,
   handleDeleteVault,
+  handleArchiveVault,
   handleUpdateVaultVisibility,
   handleListVaultShares,
   handleCreateVaultShare,
@@ -146,7 +147,7 @@ const PUBLICATION_FIELDS = [
 ];
 
 const VAULT_SELECT =
-  "id, user_id, name, description, color, public_slug, category, abstract, created_at, updated_at, visibility";
+  "id, user_id, name, description, color, public_slug, category, abstract, created_at, updated_at, visibility, archived_at";
 const API_KEY_SELECT =
   "id, owner_user_id, label, description, key_prefix, scopes, expires_at, revoked_at, last_used_at, created_at, api_key_vaults(vault_id)";
 const VAULT_PUBLICATION_SELECT = [
@@ -2329,6 +2330,9 @@ export async function handler(event) {
         response = await handleUpdateVault(supabase, principal, context, route[1], event);
       } else if (route.length === 2 && route[0] === "vaults" && event.httpMethod === "DELETE") {
         response = await handleDeleteVault(supabase, principal, context, route[1]);
+      // ── V2: archive ────────────────────────────────────────────────────────
+      } else if (route.length === 3 && route[0] === "vaults" && route[2] === "archive" && event.httpMethod === "POST") {
+        response = await handleArchiveVault(supabase, principal, context, route[1]);
       // ── V2: visibility ──────────────────────────────────────────────────────
       } else if (route.length === 3 && route[0] === "vaults" && route[2] === "visibility" && event.httpMethod === "PATCH") {
         response = await handleUpdateVaultVisibility(supabase, principal, context, route[1], event);

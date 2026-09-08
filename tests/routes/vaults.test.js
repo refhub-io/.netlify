@@ -3,6 +3,7 @@ import {
   handleCreateVault,
   handleUpdateVault,
   handleDeleteVault,
+  handleArchiveVault,
   handleUpdateVaultVisibility,
   handleListVaultShares,
   handleCreateVaultShare,
@@ -183,6 +184,74 @@ describe("handleDeleteVault", () => {
     const principal = makeApiKeyPrincipal();
 
     const res = await handleDeleteVault(supabase, principal, CTX, vault.id);
+
+    expect(res.statusCode).toBe(200);
+    expect(parseBody(res).data.id).toBe(vault.id);
+  });
+
+  it("still succeeds when the vault is archived — owner can always delete", async () => {
+    const vault = makeMockVault({ archived_at: "2026-01-01T00:00:00Z" });
+    const supabase = makeVaultAccessMock(vault);
+    const principal = makeApiKeyPrincipal();
+
+    const res = await handleDeleteVault(supabase, principal, CTX, vault.id);
+
+    expect(res.statusCode).toBe(200);
+  });
+});
+
+// ─── handleArchiveVault ──────────────────────────────────────────────────────
+
+describe("handleArchiveVault", () => {
+  it("returns 403 when scope missing", async () => {
+    const supabase = makeMockSupabase({});
+    const principal = makeApiKeyPrincipal({ scopes: ["vaults:read"] });
+
+    const res = await handleArchiveVault(supabase, principal, CTX, "v1");
+
+    expect(res.statusCode).toBe(403);
+  });
+
+  it("returns 404 when vault not found", async () => {
+    const supabase = makeMockSupabase({ vaults: { data: null, error: null } });
+    const principal = makeApiKeyPrincipal();
+
+    const res = await handleArchiveVault(supabase, principal, CTX, "missing");
+
+    expect(res.statusCode).toBe(404);
+  });
+
+  it("returns 403 when caller only has editor access, not owner", async () => {
+    const vault = makeMockVault({ user_id: "someone-else" });
+    const supabase = makeMockSupabase({
+      vaults: { data: vault, error: null },
+      vault_shares: { data: { role: "editor" }, error: null },
+    });
+    const principal = makeApiKeyPrincipal();
+
+    const res = await handleArchiveVault(supabase, principal, CTX, vault.id);
+
+    expect(res.statusCode).toBe(403);
+    expect(parseBody(res).error.code).toBe("insufficient_vault_access");
+  });
+
+  it("returns 409 vault_archived when the vault is already archived — no re-archiving, no unarchive path", async () => {
+    const vault = makeMockVault({ archived_at: "2026-01-01T00:00:00Z" });
+    const supabase = makeVaultAccessMock(vault);
+    const principal = makeApiKeyPrincipal();
+
+    const res = await handleArchiveVault(supabase, principal, CTX, vault.id);
+
+    expect(res.statusCode).toBe(409);
+    expect(parseBody(res).error.code).toBe("vault_archived");
+  });
+
+  it("returns 200 on a non-archived vault", async () => {
+    const vault = makeMockVault();
+    const supabase = makeVaultAccessMock(vault);
+    const principal = makeApiKeyPrincipal();
+
+    const res = await handleArchiveVault(supabase, principal, CTX, vault.id);
 
     expect(res.statusCode).toBe(200);
     expect(parseBody(res).data.id).toBe(vault.id);

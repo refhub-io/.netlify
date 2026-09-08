@@ -247,15 +247,24 @@ describe("handleArchiveVault", () => {
     expect(parseBody(res).error.message).toBe("This vault is archived and is permanently read-only");
   });
 
-  it("returns 200 on a non-archived vault", async () => {
+  it("returns 200 with archived_at set on success", async () => {
     const vault = makeMockVault();
-    const supabase = makeVaultAccessMock(vault);
+    const archived = { ...vault, archived_at: "2026-01-01T00:00:00Z" };
+    // First "vaults" result is resolveVaultAccess's read (must be
+    // non-archived to pass); second is the handler's own update+select --
+    // distinct from the first, so this only passes if handleArchiveVault
+    // actually performs the update rather than echoing back the initial read.
+    const supabase = makeMockSupabaseMulti({
+      vaults: [{ data: vault, error: null }, { data: archived, error: null }],
+      vault_shares: [{ data: null, error: null }],
+    });
     const principal = makeApiKeyPrincipal();
 
     const res = await handleArchiveVault(supabase, principal, CTX, vault.id);
 
     expect(res.statusCode).toBe(200);
     expect(parseBody(res).data.id).toBe(vault.id);
+    expect(parseBody(res).data.archived_at).toBe("2026-01-01T00:00:00Z");
   });
 });
 

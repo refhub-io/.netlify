@@ -7,7 +7,7 @@
  */
 
 export const VAULT_SELECT =
-  "id, user_id, name, description, color, public_slug, category, abstract, created_at, updated_at, visibility";
+  "id, user_id, name, description, color, public_slug, category, abstract, created_at, updated_at, visibility, archived_at";
 
 export const PUBLICATION_FIELDS = [
   "title",

@@ -12,7 +12,7 @@
  * TODO: expose audit log viewer in the frontend API Key management panel.
  */
 
-import { resolveVaultAccess } from "../auth.js";
+import { resolveVaultAccess, vaultAccessErrorMessage } from "../auth.js";
 import { json, errorResponse } from "../http.js";
 
 const AUDIT_SELECT = "id, api_key_id, request_id, method, path, response_status, ip_address, user_agent, duration_ms, created_at";
@@ -27,9 +27,11 @@ function parsePaginationParams(params) {
 
 export async function handleListVaultAudit(supabase, principal, context, vaultId, event) {
   // No scope guard — vault owner access is sufficient
-  const access = await resolveVaultAccess(supabase, principal, vaultId, "owner");
+  // allowArchived: this is a read (gated at owner level for privacy, not
+  // because it writes anything) -- archived vaults must stay fully readable.
+  const access = await resolveVaultAccess(supabase, principal, vaultId, "owner", { allowArchived: true });
   if (!access.ok) {
-    return errorResponse(access.status, access.code, "Vault access denied", context.requestId);
+    return errorResponse(access.status, access.code, vaultAccessErrorMessage(access.code), context.requestId);
   }
 
   const params = (event && event.queryStringParameters) || {};

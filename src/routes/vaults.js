@@ -5,6 +5,7 @@
  *   POST   /api/v1/vaults                              handleCreateVault
  *   PATCH  /api/v1/vaults/:vaultId                     handleUpdateVault
  *   DELETE /api/v1/vaults/:vaultId                     handleDeleteVault
+ *   POST   /api/v1/vaults/:vaultId/archive             handleArchiveVault
  *   PATCH  /api/v1/vaults/:vaultId/visibility          handleUpdateVaultVisibility
  *   GET    /api/v1/vaults/:vaultId/shares              handleListVaultShares
  *   POST   /api/v1/vaults/:vaultId/shares              handleCreateVaultShare
@@ -12,7 +13,7 @@
  *   DELETE /api/v1/vaults/:vaultId/shares/:shareId     handleDeleteVaultShare
  */
 
-import { API_SCOPES, requireScope, resolveVaultAccess } from "../auth.js";
+import { API_SCOPES, requireScope, resolveVaultAccess, vaultAccessErrorMessage } from "../auth.js";
 import { json, errorResponse, parseJsonBody } from "../http.js";
 import { VAULT_SELECT } from "./utils.js";
 
@@ -76,7 +77,7 @@ export async function handleUpdateVault(supabase, principal, context, vaultId, e
 
   const access = await resolveVaultAccess(supabase, principal, vaultId, "owner");
   if (!access.ok) {
-    return errorResponse(access.status, access.code, "Vault access denied", context.requestId);
+    return errorResponse(access.status, access.code, vaultAccessErrorMessage(access.code), context.requestId);
   }
 
   const parsed = parseJsonBody(event);
@@ -119,15 +120,47 @@ export async function handleDeleteVault(supabase, principal, context, vaultId) {
     return errorResponse(403, "missing_scope", "Scope vaults:admin is required", context.requestId);
   }
 
-  const access = await resolveVaultAccess(supabase, principal, vaultId, "owner");
+  // allowArchived: an archived vault is otherwise permanently read-only, but
+  // the owner can still delete it outright -- this is the one deliberate
+  // exception to that rule.
+  const access = await resolveVaultAccess(supabase, principal, vaultId, "owner", { allowArchived: true });
   if (!access.ok) {
-    return errorResponse(access.status, access.code, "Vault access denied", context.requestId);
+    return errorResponse(access.status, access.code, vaultAccessErrorMessage(access.code), context.requestId);
   }
 
   const { error } = await supabase.from("vaults").delete().eq("id", vaultId);
   if (error) throw error;
 
   return json(200, { data: { id: vaultId }, meta: { request_id: context.requestId } });
+}
+
+// ---------------------------------------------------------------------------
+// Archive
+// ---------------------------------------------------------------------------
+
+export async function handleArchiveVault(supabase, principal, context, vaultId) {
+  if (!requireScope(principal, API_SCOPES.ADMIN)) {
+    return errorResponse(403, "missing_scope", "Scope vaults:admin is required", context.requestId);
+  }
+
+  // No allowArchived here: an already-archived vault correctly 409s as
+  // vault_archived rather than hitting the DB trigger's raw exception.
+  // There is no unarchive route -- archiving is permanent.
+  const access = await resolveVaultAccess(supabase, principal, vaultId, "owner");
+  if (!access.ok) {
+    return errorResponse(access.status, access.code, vaultAccessErrorMessage(access.code), context.requestId);
+  }
+
+  const { data: vault, error } = await supabase
+    .from("vaults")
+    .update({ archived_at: new Date().toISOString() })
+    .eq("id", vaultId)
+    .select(VAULT_SELECT)
+    .single();
+
+  if (error) throw error;
+
+  return json(200, { data: vault, meta: { request_id: context.requestId } });
 }
 
 // ---------------------------------------------------------------------------
@@ -141,7 +174,7 @@ export async function handleUpdateVaultVisibility(supabase, principal, context, 
 
   const access = await resolveVaultAccess(supabase, principal, vaultId, "owner");
   if (!access.ok) {
-    return errorResponse(access.status, access.code, "Vault access denied", context.requestId);
+    return errorResponse(access.status, access.code, vaultAccessErrorMessage(access.code), context.requestId);
   }
 
   const parsed = parseJsonBody(event);
@@ -198,7 +231,7 @@ export async function handleListVaultShares(supabase, principal, context, vaultI
 
   const access = await resolveVaultAccess(supabase, principal, vaultId, "viewer");
   if (!access.ok) {
-    return errorResponse(access.status, access.code, "Vault access denied", context.requestId);
+    return errorResponse(access.status, access.code, vaultAccessErrorMessage(access.code), context.requestId);
   }
 
   const { data, error } = await supabase
@@ -222,7 +255,7 @@ export async function handleCreateVaultShare(supabase, principal, context, vault
 
   const access = await resolveVaultAccess(supabase, principal, vaultId, "owner");
   if (!access.ok) {
-    return errorResponse(access.status, access.code, "Vault access denied", context.requestId);
+    return errorResponse(access.status, access.code, vaultAccessErrorMessage(access.code), context.requestId);
   }
 
   const parsed = parseJsonBody(event);
@@ -275,7 +308,7 @@ export async function handleUpdateVaultShare(supabase, principal, context, vault
 
   const access = await resolveVaultAccess(supabase, principal, vaultId, "owner");
   if (!access.ok) {
-    return errorResponse(access.status, access.code, "Vault access denied", context.requestId);
+    return errorResponse(access.status, access.code, vaultAccessErrorMessage(access.code), context.requestId);
   }
 
   const parsed = parseJsonBody(event);
@@ -312,7 +345,7 @@ export async function handleDeleteVaultShare(supabase, principal, context, vault
 
   const access = await resolveVaultAccess(supabase, principal, vaultId, "owner");
   if (!access.ok) {
-    return errorResponse(access.status, access.code, "Vault access denied", context.requestId);
+    return errorResponse(access.status, access.code, vaultAccessErrorMessage(access.code), context.requestId);
   }
 
   const { error } = await supabase

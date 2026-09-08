@@ -75,8 +75,8 @@ That is good for v1, but too coarse for growth.
 ### Needed capabilities
 - create vault
 - update vault metadata
-- archive/unarchive vault
-- delete vault (or soft-delete)
+- archive vault (irreversible — no unarchive, ever; enforced by a DB trigger on `vaults.archived_at`, not just app-level policy)
+- delete vault (owner can still delete an archived vault outright)
 - duplicate/clone vault
 - list collaborators / permission state
 - manage sharing
@@ -87,8 +87,7 @@ Agents often need to create a task- or project-specific workspace, fill it, orga
 ### Proposed endpoint family
 - `POST /api/v1/vaults`
 - `PATCH /api/v1/vaults/:vaultId`
-- `POST /api/v1/vaults/:vaultId/archive`
-- `POST /api/v1/vaults/:vaultId/unarchive`
+- `POST /api/v1/vaults/:vaultId/archive` (no corresponding unarchive route — archiving a vault is permanent)
 - `DELETE /api/v1/vaults/:vaultId`
 - `GET /api/v1/vaults/:vaultId/shares`
 - `POST /api/v1/vaults/:vaultId/shares`

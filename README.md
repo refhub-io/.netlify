@@ -47,6 +47,7 @@ POST   /api/v1/vaults
 GET    /api/v1/vaults/:vaultId
 PATCH  /api/v1/vaults/:vaultId
 DELETE /api/v1/vaults/:vaultId
+POST   /api/v1/vaults/:vaultId/archive
 PATCH  /api/v1/vaults/:vaultId/visibility
 GET    /api/v1/vaults/:vaultId/shares
 POST   /api/v1/vaults/:vaultId/shares

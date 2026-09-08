@@ -3,7 +3,7 @@ import { createClient } from "@supabase/supabase-js";
 import { getConfig } from "./config.js";
 
 const VAULT_SELECT =
-  "id, user_id, name, description, color, public_slug, category, abstract, created_at, updated_at, visibility";
+  "id, user_id, name, description, color, public_slug, category, abstract, created_at, updated_at, visibility, archived_at";
 
 export const API_SCOPES = {
   READ: "vaults:read",
@@ -184,7 +184,13 @@ function permissionRank(permission) {
   return 1;
 }
 
-export async function resolveVaultAccess(supabase, principal, vaultId, requiredPermission = "viewer") {
+export async function resolveVaultAccess(
+  supabase,
+  principal,
+  vaultId,
+  requiredPermission = "viewer",
+  { allowArchived = false } = {},
+) {
   if (principal.restrictedVaultIds && !principal.restrictedVaultIds.has(vaultId)) {
     return { ok: false, status: 403, code: "vault_not_allowed" };
   }
@@ -222,5 +228,27 @@ export async function resolveVaultAccess(supabase, principal, vaultId, requiredP
     return { ok: false, status: 403, code: "insufficient_vault_access" };
   }
 
+  // Archived vaults are permanently read-only: any editor/owner-level check
+  // is rejected regardless of the caller's actual resolved permission, so a
+  // viewer-required check (reads) is always unaffected. Callers that must
+  // still act on an archived vault at owner level (currently only vault
+  // deletion) pass { allowArchived: true } explicitly rather than this
+  // function silently carving out exceptions per route.
+  if (vault.archived_at && !allowArchived && permissionRank(requiredPermission) >= permissionRank("editor")) {
+    return { ok: false, status: 409, code: "vault_archived" };
+  }
+
   return { ok: true, vault, permission };
+}
+
+/**
+ * Maps a resolveVaultAccess() failure code to a specific, accurate message.
+ * "Vault access denied" is wrong for vault_archived -- the caller has full
+ * access, the vault is just frozen -- and for vault_not_found, which isn't
+ * an access problem at all.
+ */
+export function vaultAccessErrorMessage(code) {
+  if (code === "vault_not_found") return "Vault not found";
+  if (code === "vault_archived") return "This vault is archived and is permanently read-only";
+  return "Vault access denied";
 }

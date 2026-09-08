@@ -6,6 +6,15 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this
 project uses [Semantic Versioning](https://semver.org/). History prior to
 2.2.0 was not tracked in this file.
 
+## [2.7.0] - 2026-09-08
+
+### Added
+- Curated vault sections (#196): `GET/POST /api/v1/vaults/:vaultId/sections` and `PATCH/DELETE .../sections/:sectionId`, backed by the new `vault_sections` table. List is viewer-level (`vaults:read`); create/update/delete are owner-level (`vaults:admin`), matching the "Vault owners can manage their vault's sections" RLS policy.
+- `vault_publications` rows now expose `section_id`, `section_position`, `featured`, and `featured_note` on every route that selects `VAULT_PUBLICATION_SELECT`. These four fields are vault-local curation state (never part of the bibliographic rollup) and can only be set via `PATCH /vaults/:vaultId/items/:itemId` by the vault **owner** — an editor share gets `403 insufficient_vault_access` ("Only the vault owner can change section/featured state") even though the same editor can update bibliographic fields on the same request.
+
+### Changed
+- `PATCH /vaults/:vaultId/items/:itemId` now performs a second, owner-level `resolveVaultAccess` check whenever the request body includes any of `section_id`/`section_position`/`featured`/`featured_note`, in addition to the existing editor-level check for bibliographic fields. Setting `section_id` to a section that doesn't belong to the vault returns `400 invalid_body`.
+
 ## [2.6.0] - 2026-09-08
 
 ### Added

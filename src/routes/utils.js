@@ -52,6 +52,10 @@ export const VAULT_PUBLICATION_SELECT = [
   "version",
   "created_at",
   "updated_at",
+  "section_id",
+  "section_position",
+  "featured",
+  "featured_note",
   ...PUBLICATION_FIELDS,
 ].join(", ");
 

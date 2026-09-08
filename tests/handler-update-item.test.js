@@ -181,3 +181,128 @@ describe("PATCH /vaults/:vaultId/items/:itemId — bibliographic rollup", () => 
     expect(rpc).toHaveBeenCalledTimes(1);
   });
 });
+
+describe("PATCH /vaults/:vaultId/items/:itemId — section/featured fields (#196)", () => {
+  beforeEach(() => {
+    process.env.SUPABASE_URL = "http://localhost";
+    process.env.SUPABASE_SERVICE_ROLE_KEY = "test";
+    process.env.REFHUB_API_KEY_PEPPER = "test";
+    process.env.REFHUB_API_AUDIT_DISABLED = "true";
+    process.env.REFHUB_API_MAX_BODY_BYTES = String(50 * 1024 * 1024);
+    process.env.GOOGLE_DRIVE_MAX_UPLOAD_BYTES = String(25 * 1024 * 1024);
+    vi.mocked(authenticateApiKey).mockReset();
+  });
+
+  it("owner can set featured/featured_note; no rollup RPC call for vault-local-only fields", async () => {
+    const capture = makeCapturingSupabaseMulti(
+      {
+        // resolveVaultAccess is called twice: the route's own editor-level
+        // check, then this handler's second, owner-level check gating the
+        // section/featured patch specifically.
+        vaults: [{ data: VAULT, error: null }, { data: VAULT, error: null }],
+        vault_shares: [{ data: null, error: null }],
+        vault_publications: [
+          { data: EXISTING_ITEM, error: null }, // existingResult read
+          { data: null, error: null }, // section/featured direct update
+          { data: { ...EXISTING_ITEM, featured: true, featured_note: "great paper" }, error: null }, // refreshed read
+        ],
+      },
+      ["vault_publications"],
+    );
+    const rpcSpy = vi.fn().mockResolvedValue({ data: null, error: null });
+    capture.supabase.rpc = rpcSpy;
+
+    vi.mocked(authenticateApiKey).mockResolvedValue({
+      supabase: capture.supabase,
+      principal: makeApiKeyPrincipal({ scopes: ["vaults:write"], userId: "user-test" }),
+    });
+
+    const res = await handler(makePatchEvent({ featured: true, featured_note: "great paper" }));
+
+    expect(res.statusCode).toBe(200);
+    expect(rpcSpy).not.toHaveBeenCalled();
+    expect(capture.captured.vault_publications.updates).toHaveLength(1);
+    expect(capture.captured.vault_publications.updates[0]).toEqual({ featured: true, featured_note: "great paper" });
+    expect(parseBody(res).data.featured).toBe(true);
+  });
+
+  it("rejects a non-owner (editor share) trying to set featured", async () => {
+    const supabase = makeCapturingSupabaseMulti(
+      {
+        // Editor share passes the route's own editor-level check (1st call);
+        // the same share fetch happens again for the owner-level check
+        // (2nd call), which then correctly fails since editor < owner.
+        vaults: [{ data: VAULT, error: null }, { data: VAULT, error: null }],
+        vault_shares: [{ data: { role: "editor" }, error: null }, { data: { role: "editor" }, error: null }],
+        vault_publications: [{ data: EXISTING_ITEM, error: null }],
+      },
+      ["vault_publications"],
+    ).supabase;
+
+    vi.mocked(authenticateApiKey).mockResolvedValue({
+      supabase,
+      // Not the vault owner (VAULT.user_id is "user-test") — an editor collaborator instead.
+      principal: makeApiKeyPrincipal({ scopes: ["vaults:write"], userId: "editor-user" }),
+    });
+
+    const res = await handler(makePatchEvent({ featured: true }));
+
+    expect(res.statusCode).toBe(403);
+    const body = parseBody(res);
+    expect(body.error.code).toBe("insufficient_vault_access");
+    expect(body.error.message).toBe("Only the vault owner can change section/featured state");
+  });
+
+  it("rejects section_id that doesn't belong to this vault with 400", async () => {
+    const supabase = makeCapturingSupabaseMulti(
+      {
+        vaults: [{ data: VAULT, error: null }, { data: VAULT, error: null }],
+        vault_shares: [{ data: null, error: null }],
+        vault_publications: [{ data: EXISTING_ITEM, error: null }],
+        vault_sections: [{ data: null, error: null }], // section lookup misses
+      },
+      ["vault_publications"],
+    ).supabase;
+
+    vi.mocked(authenticateApiKey).mockResolvedValue({
+      supabase,
+      principal: makeApiKeyPrincipal({ scopes: ["vaults:write"], userId: "user-test" }),
+    });
+
+    const res = await handler(makePatchEvent({ section_id: "not-in-this-vault" }));
+
+    expect(res.statusCode).toBe(400);
+    expect(parseBody(res).error.code).toBe("invalid_body");
+  });
+
+  it("applies both a rollup field and a section field from the same PATCH", async () => {
+    const capture = makeCapturingSupabaseMulti(
+      {
+        vaults: [{ data: VAULT, error: null }, { data: VAULT, error: null }],
+        vault_shares: [{ data: null, error: null }],
+        vault_publications: [
+          { data: EXISTING_ITEM, error: null },
+          { data: null, error: null },
+          { data: { ...EXISTING_ITEM, title: "New Title", featured: true }, error: null },
+        ],
+      },
+      ["vault_publications"],
+    );
+    const rpcSpy = vi.fn().mockResolvedValue({ data: null, error: null });
+    capture.supabase.rpc = rpcSpy;
+
+    vi.mocked(authenticateApiKey).mockResolvedValue({
+      supabase: capture.supabase,
+      principal: makeApiKeyPrincipal({ scopes: ["vaults:write"], userId: "user-test" }),
+    });
+
+    const res = await handler(makePatchEvent({ title: "New Title", featured: true }));
+
+    expect(res.statusCode).toBe(200);
+    expect(rpcSpy).toHaveBeenCalledWith(
+      "update_vault_publication_with_rollup",
+      expect.objectContaining({ p_patch: { title: "New Title" } }),
+    );
+    expect(capture.captured.vault_publications.updates[0]).toEqual({ featured: true });
+  });
+});

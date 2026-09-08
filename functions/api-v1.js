@@ -85,6 +85,12 @@ import {
   handleDetachTags,
 } from "../src/routes/tags.js";
 import {
+  handleListSections,
+  handleCreateSection,
+  handleUpdateSection,
+  handleDeleteSection,
+} from "../src/routes/sections.js";
+import {
   handleListRelations,
   handleCreateRelation,
   handleUpdateRelation,
@@ -159,6 +165,10 @@ const VAULT_PUBLICATION_SELECT = [
   "version",
   "created_at",
   "updated_at",
+  "section_id",
+  "section_position",
+  "featured",
+  "featured_note",
   ...PUBLICATION_FIELDS,
 ].join(", ");
 const SEMANTIC_SCHOLAR_CACHE_TTL_MS = 60 * 1000;
@@ -2088,6 +2098,51 @@ async function handleUpdateItem(supabase, principal, context, vaultId, itemId, e
     return errorResponse(404, "item_not_found", "Vault item not found", context.requestId);
   }
 
+  // section_id/section_position/featured/featured_note are vault-specific
+  // curation state (#196), not canonical publication fields -- they never
+  // go through the rollup RPC below. Gated at owner level, matching
+  // enforce_vault_section_owner_only's intent: that trigger fully trusts
+  // this backend's own check for service-role connections (see
+  // 20260908000000_vault_sections_service_role_bypass.sql in refhub.io),
+  // so this is the only enforcement for this specific patch.
+  const SECTION_FEATURED_FIELDS = ["section_id", "section_position", "featured", "featured_note"];
+  const sectionFeaturedPatch = {};
+  for (const field of SECTION_FEATURED_FIELDS) {
+    if (body[field] !== undefined) sectionFeaturedPatch[field] = body[field];
+  }
+
+  if (Object.keys(sectionFeaturedPatch).length > 0) {
+    const ownerAccess = await resolveVaultAccess(supabase, principal, vaultId, "owner");
+    if (!ownerAccess.ok) {
+      const message =
+        ownerAccess.code === "insufficient_vault_access"
+          ? "Only the vault owner can change section/featured state"
+          : vaultAccessErrorMessage(ownerAccess.code);
+      return errorResponse(ownerAccess.status, ownerAccess.code, message, context.requestId);
+    }
+
+    if (sectionFeaturedPatch.section_id) {
+      const sectionCheck = await supabase
+        .from("vault_sections")
+        .select("id")
+        .eq("id", sectionFeaturedPatch.section_id)
+        .eq("vault_id", vaultId)
+        .maybeSingle();
+      if (sectionCheck.error) throw sectionCheck.error;
+      if (!sectionCheck.data) {
+        return errorResponse(400, "invalid_body", "section_id does not belong to this vault", context.requestId);
+      }
+    }
+
+    const sectionPatchResult = await supabase
+      .from("vault_publications")
+      .update(sectionFeaturedPatch)
+      .eq("id", itemId)
+      .eq("vault_id", vaultId);
+
+    if (sectionPatchResult.error) throw sectionPatchResult.error;
+  }
+
   if (Object.keys(updateRow).length > 0) {
     const rollupResult = await supabase.rpc("update_vault_publication_with_rollup", {
       p_vault_publication_id: itemId,
@@ -2359,6 +2414,15 @@ export async function handler(event) {
         response = await handleUpdateTag(supabase, principal, context, route[1], route[3], event);
       } else if (route.length === 4 && route[0] === "vaults" && route[2] === "tags" && event.httpMethod === "DELETE") {
         response = await handleDeleteTag(supabase, principal, context, route[1], route[3]);
+      // ── V2: sections ────────────────────────────────────────────────────────
+      } else if (route.length === 3 && route[0] === "vaults" && route[2] === "sections" && event.httpMethod === "GET") {
+        response = await handleListSections(supabase, principal, context, route[1]);
+      } else if (route.length === 3 && route[0] === "vaults" && route[2] === "sections" && event.httpMethod === "POST") {
+        response = await handleCreateSection(supabase, principal, context, route[1], event);
+      } else if (route.length === 4 && route[0] === "vaults" && route[2] === "sections" && event.httpMethod === "PATCH") {
+        response = await handleUpdateSection(supabase, principal, context, route[1], route[3], event);
+      } else if (route.length === 4 && route[0] === "vaults" && route[2] === "sections" && event.httpMethod === "DELETE") {
+        response = await handleDeleteSection(supabase, principal, context, route[1], route[3]);
       // ── V2: relations ───────────────────────────────────────────────────────
       } else if (route.length === 3 && route[0] === "vaults" && route[2] === "relations" && event.httpMethod === "GET") {
         response = await handleListRelations(supabase, principal, context, route[1], event);

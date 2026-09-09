@@ -68,6 +68,10 @@ PATCH  /api/v1/vaults/:vaultId/tags/:tagId
 DELETE /api/v1/vaults/:vaultId/tags/:tagId
 POST   /api/v1/vaults/:vaultId/tags/attach
 POST   /api/v1/vaults/:vaultId/tags/detach
+GET    /api/v1/vaults/:vaultId/sections
+POST   /api/v1/vaults/:vaultId/sections
+PATCH  /api/v1/vaults/:vaultId/sections/:sectionId
+DELETE /api/v1/vaults/:vaultId/sections/:sectionId
 GET    /api/v1/vaults/:vaultId/relations
 POST   /api/v1/vaults/:vaultId/relations
 PATCH  /api/v1/vaults/:vaultId/relations/:relationId
@@ -198,6 +202,7 @@ publications
 tags
 publication_tags
 publication_relations
+vault_sections
 ```
 
 write flow for new items:
@@ -502,6 +507,30 @@ scope: `vaults:write` · permission: editor.
 scope: `vaults:write` · permission: editor. partial update. if `tag_ids` is present it replaces the full tag set.
 
 bibliographic fields (everything in the publication field set except `notes`) are rolled up atomically to the canonical `publications` row and every sibling `vault_publications` copy of the same paper in other vaults — matching the RefHub frontend's own propagation rule. `notes` and `tag_ids` are vault-local and never propagate. The bibliographic rollup itself is all-or-nothing: on failure, none of its fields are applied anywhere and the response is `502 publication_rollup_failed` with the underlying database error in `details.postgres_message` — never a partial rollup reported as success. This atomicity guarantee covers only the rollup; `tag_ids` replacement is a separate step that runs after it and can succeed or fail independently (e.g. an invalid tag ID can leave a bibliographic change already applied while the tag update fails) — a request that touches both should check the response code rather than assume all-or-nothing across both concerns.
+
+`section_id`, `section_position`, `featured`, and `featured_note` are vault-local, curation-only fields (#196) — grouping and highlighting items for display on public vault pages. They are never part of the bibliographic rollup. Setting any of them requires **owner**-level access, not just editor — enforced by an explicit `resolveVaultAccess(..., "owner")` check in this handler (mirroring the `enforce_vault_section_owner_only` DB trigger that also guards these same four columns). An editor-only share attempting to set them gets `403 insufficient_vault_access` with the message "Only the vault owner can change section/featured state", even though the same editor could update bibliographic fields on the same request. Setting `section_id` to a section that doesn't belong to this vault returns `400 invalid_body`.
+
+### `GET /api/v1/vaults/:vaultId/sections` · `POST /api/v1/vaults/:vaultId/sections` · `PATCH .../sections/:sectionId` · `DELETE .../sections/:sectionId`
+
+Curated sections group a vault's items for display on public vault pages (#196). List is viewer-level (`vaults:read`); create/update/delete are **owner**-level (`vaults:admin`), matching the "Vault owners can manage their vault's sections" RLS policy — editor shares can view sections but not create, rename, reorder, or delete them.
+
+```json
+{ "name": "Methods", "description": "Core methodology papers", "position": 0 }
+```
+
+- `name` required (non-empty string) on create; optional on update, but must be a non-empty string when present
+- `position` optional integer; defaults to `0` via the column default when omitted on create
+- `PATCH` accepts any subset of `name` / `description` / `position`; returns `400 invalid_body` if the body has none of them, `404 section_not_found` if the section doesn't exist in this vault
+- `DELETE` unfiles the section's items rather than deleting them — `vault_publications.section_id` is `ON DELETE SET NULL`
+
+response shape (create/update — a single section object; list returns the same shape as an array in `data`):
+
+```json
+{
+  "data": { "id": "uuid", "vault_id": "uuid", "name": "Methods", "description": null, "position": 0, "created_at": "...", "updated_at": "..." },
+  "meta": { "request_id": "uuid", "vault_id": "uuid" }
+}
+```
 
 ### `GET /api/v1/vaults/:vaultId/export?format=json|bibtex`
 

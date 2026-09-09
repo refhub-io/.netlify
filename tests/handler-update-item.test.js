@@ -275,6 +275,30 @@ describe("PATCH /vaults/:vaultId/items/:itemId — section/featured fields (#196
     expect(parseBody(res).error.code).toBe("invalid_body");
   });
 
+  it("rejects a malformed section_id (invalid UUID syntax) with 400, not a raw DB 500", async () => {
+    const supabase = makeCapturingSupabaseMulti(
+      {
+        vaults: [{ data: VAULT, error: null }, { data: VAULT, error: null }],
+        vault_shares: [{ data: null, error: null }],
+        vault_publications: [{ data: EXISTING_ITEM, error: null }],
+        // Postgres rejects "" (and other non-UUID strings) as an invalid_text_representation
+        // error (22P02) before any row lookup happens.
+        vault_sections: [{ data: null, error: { code: "22P02", message: "invalid input syntax for type uuid" } }],
+      },
+      ["vault_publications"],
+    ).supabase;
+
+    vi.mocked(authenticateApiKey).mockResolvedValue({
+      supabase,
+      principal: makeApiKeyPrincipal({ scopes: ["vaults:write"], userId: "user-test" }),
+    });
+
+    const res = await handler(makePatchEvent({ section_id: "" }));
+
+    expect(res.statusCode).toBe(400);
+    expect(parseBody(res).error.code).toBe("invalid_body");
+  });
+
   it("applies both a rollup field and a section field from the same PATCH", async () => {
     const capture = makeCapturingSupabaseMulti(
       {

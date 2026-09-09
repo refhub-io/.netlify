@@ -2121,14 +2121,22 @@ async function handleUpdateItem(supabase, principal, context, vaultId, itemId, e
       return errorResponse(ownerAccess.status, ownerAccess.code, message, context.requestId);
     }
 
-    if (sectionFeaturedPatch.section_id) {
+    if ("section_id" in sectionFeaturedPatch && sectionFeaturedPatch.section_id !== null) {
       const sectionCheck = await supabase
         .from("vault_sections")
         .select("id")
         .eq("id", sectionFeaturedPatch.section_id)
         .eq("vault_id", vaultId)
         .maybeSingle();
-      if (sectionCheck.error) throw sectionCheck.error;
+      if (sectionCheck.error) {
+        // 22P02 = invalid_text_representation, e.g. a malformed/empty UUID —
+        // that's a client error, not an infra failure, so map it to the same
+        // 400 a "doesn't belong to this vault" miss would return.
+        if (sectionCheck.error.code === "22P02") {
+          return errorResponse(400, "invalid_body", "section_id is not a valid UUID", context.requestId);
+        }
+        throw sectionCheck.error;
+      }
       if (!sectionCheck.data) {
         return errorResponse(400, "invalid_body", "section_id does not belong to this vault", context.requestId);
       }

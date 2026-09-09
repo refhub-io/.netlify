@@ -523,7 +523,7 @@ Curated sections group a vault's items for display on public vault pages (#196).
 - `PATCH` accepts any subset of `name` / `description` / `position`; returns `400 invalid_body` if the body has none of them, `404 section_not_found` if the section doesn't exist in this vault
 - `DELETE` unfiles the section's items rather than deleting them — `vault_publications.section_id` is `ON DELETE SET NULL`
 
-response shape (list/create/update):
+response shape (create/update — a single section object; list returns the same shape as an array in `data`):
 
 ```json
 {

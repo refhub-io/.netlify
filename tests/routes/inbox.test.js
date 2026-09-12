@@ -102,7 +102,7 @@ describe("handleCreateInboxItem", () => {
   });
 
   it("doi: degrades to a bare title when lookup fails, never blocks capture", async () => {
-    const created = { id: "i1", status: "pending", source_type: "doi", source_ref: "10.1/x", parsed_fields: { title: "10.1/x" } };
+    const created = { id: "i1", status: "pending", source_type: "doi", source_ref: "10.1/x", parsed_fields: { title: "10.1/x", doi: "10.1/x" } };
     const supabase = makeMockSupabaseMulti({
       inbox_items: [{ data: created, error: null }],
     });
@@ -120,6 +120,28 @@ describe("handleCreateInboxItem", () => {
 
     expect(res.statusCode).toBe(201);
     expect(parseBody(res).data.parsed_fields.title).toBe("10.1/x");
+    expect(parseBody(res).data.parsed_fields.doi).toBe("10.1/x");
+  });
+
+  it("doi: stamps the resolved doi into parsed_fields on successful lookup", async () => {
+    const created = { id: "i2", status: "pending", source_type: "doi", source_ref: "10.1/y", parsed_fields: { title: "Real Paper", doi: "10.1/y" } };
+    const supabase = makeMockSupabaseMulti({
+      inbox_items: [{ data: created, error: null }],
+    });
+    const principal = makeApiKeyPrincipal();
+
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve({ message: { title: ["Real Paper"], author: [] } }),
+    }));
+
+    const res = await handleCreateInboxItem(supabase, principal, CTX, makeEvent({
+      method: "POST",
+      body: JSON.stringify({ source_type: "doi", source_ref: "10.1/y" }),
+    }));
+
+    expect(res.statusCode).toBe(201);
+    expect(parseBody(res).data.parsed_fields.doi).toBe("10.1/y");
   });
 });
 

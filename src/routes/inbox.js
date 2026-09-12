@@ -33,7 +33,7 @@ export async function handleListInboxItems(supabase, principal, context, event) 
   }
 
   const query = event?.queryStringParameters || {};
-  const limit = Math.min(parseInt(query.limit, 10) || 50, 200);
+  const limit = Math.min(200, Math.max(1, parseInt(query.limit, 10) || 50));
   const page = Math.max(parseInt(query.page, 10) || 1, 1);
   const from = (page - 1) * limit;
   const to = from + limit - 1;
@@ -112,8 +112,15 @@ export async function handleCreateInboxItem(supabase, principal, context, event)
     if (body.parsed_fields) {
       parsedFields = body.parsed_fields;
     } else {
+      // Neither fetchFromCrossRef nor fetchFromOpenAlex (both in import.js)
+      // put a `doi` key in their returned metadata -- handleImportDoi (the
+      // sibling vault-import route) papers over this itself with an
+      // explicit `metadata.doi = doi` before use. Do the same here: without
+      // it, a successfully-resolved DOI capture would file into a vault
+      // with publications.doi left NULL once accepted, silently losing the
+      // one field its whole capture path exists to preserve.
       const metadata = await resolveDoiMetadata(doi);
-      parsedFields = metadata ? doiMetadataToParsedFields(metadata) : { title: doi };
+      parsedFields = metadata ? { ...doiMetadataToParsedFields(metadata), doi } : { title: doi, doi };
     }
     const item = await insertInboxItem(supabase, principal, "doi", doi, parsedFields);
     return json(201, { data: item, meta: { request_id: context.requestId } });

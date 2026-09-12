@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { handleListInboxItems, handleCreateInboxItem, handleAcceptInboxItem, handleRejectInboxItem, handlePostponeInboxItem } from "../../src/routes/inbox.js";
+import { handleListInboxItems, handleCreateInboxItem, handleAcceptInboxItem, handleRejectInboxItem, handlePostponeInboxItem, handleMergeInboxItem, handleDeleteInboxItem } from "../../src/routes/inbox.js";
 import { makeMockSupabase, makeMockSupabaseMulti, makeApiKeyPrincipal, makeContext, makeEvent, parseBody, makeMockVault } from "../helpers.js";
 
 const CTX = makeContext();
@@ -305,5 +305,100 @@ describe("handlePostponeInboxItem", () => {
 
     expect(res.statusCode).toBe(200);
     expect(parseBody(res).data).toEqual({ id: "item-1", sort_order: 8 });
+  });
+});
+
+describe("handleMergeInboxItem", () => {
+  it("returns 403 when write scope missing", async () => {
+    const supabase = makeMockSupabase({});
+    const principal = makeApiKeyPrincipal({ scopes: ["vaults:read"] });
+
+    const res = await handleMergeInboxItem(supabase, principal, CTX, "item-1");
+
+    expect(res.statusCode).toBe(403);
+  });
+
+  it("returns 409 when the item has no known duplicate target", async () => {
+    const supabase = makeMockSupabaseMulti({
+      inbox_items: [{ data: { id: "item-1", status: "pending", duplicate_of_publication_id: null }, error: null }],
+    });
+    const principal = makeApiKeyPrincipal();
+
+    const res = await handleMergeInboxItem(supabase, principal, CTX, "item-1");
+
+    expect(res.statusCode).toBe(409);
+    expect(parseBody(res).error.code).toBe("no_duplicate_target");
+  });
+
+  it("happy path: sets status=merged, filed_publication_id=duplicate target", async () => {
+    const supabase = makeMockSupabaseMulti({
+      inbox_items: [
+        { data: { id: "item-1", status: "pending", duplicate_of_publication_id: "pub-1" }, error: null },
+        { data: { id: "item-1", filed_publication_id: "pub-1" }, error: null },
+      ],
+    });
+    const principal = makeApiKeyPrincipal();
+
+    const res = await handleMergeInboxItem(supabase, principal, CTX, "item-1");
+
+    expect(res.statusCode).toBe(200);
+    expect(parseBody(res).data).toEqual({ id: "item-1", filed_publication_id: "pub-1" });
+  });
+
+  it("returns 404 when the item isn't found for this user", async () => {
+    const supabase = makeMockSupabaseMulti({
+      inbox_items: [{ data: null, error: null }],
+    });
+    const principal = makeApiKeyPrincipal();
+
+    const res = await handleMergeInboxItem(supabase, principal, CTX, "item-1");
+
+    expect(res.statusCode).toBe(404);
+  });
+
+  it("returns 409 when the item exists but isn't pending", async () => {
+    const supabase = makeMockSupabaseMulti({
+      inbox_items: [{ data: { id: "item-1", status: "merged", duplicate_of_publication_id: "pub-1" }, error: null }],
+    });
+    const principal = makeApiKeyPrincipal();
+
+    const res = await handleMergeInboxItem(supabase, principal, CTX, "item-1");
+
+    expect(res.statusCode).toBe(409);
+    expect(parseBody(res).error.code).toBe("item_not_pending");
+  });
+});
+
+describe("handleDeleteInboxItem", () => {
+  it("returns 403 when write scope missing", async () => {
+    const supabase = makeMockSupabase({});
+    const principal = makeApiKeyPrincipal({ scopes: ["vaults:read"] });
+
+    const res = await handleDeleteInboxItem(supabase, principal, CTX, "item-1");
+
+    expect(res.statusCode).toBe(403);
+  });
+
+  it("deletes regardless of status and returns 200 with id", async () => {
+    const supabase = makeMockSupabaseMulti({
+      inbox_items: [{ data: { id: "item-1" }, error: null }],
+    });
+    const principal = makeApiKeyPrincipal();
+
+    const res = await handleDeleteInboxItem(supabase, principal, CTX, "item-1");
+
+    expect(res.statusCode).toBe(200);
+    expect(parseBody(res).data).toEqual({ id: "item-1" });
+  });
+
+  it("returns 404 for another user's item", async () => {
+    const supabase = makeMockSupabaseMulti({
+      inbox_items: [{ data: null, error: null }],
+    });
+    const principal = makeApiKeyPrincipal();
+
+    const res = await handleDeleteInboxItem(supabase, principal, CTX, "item-1");
+
+    expect(res.statusCode).toBe(404);
   });
 });

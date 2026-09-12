@@ -255,3 +255,47 @@ export async function handlePostponeInboxItem(supabase, principal, context, item
 
   return json(200, { data, meta: { request_id: context.requestId } });
 }
+
+export async function handleMergeInboxItem(supabase, principal, context, itemId) {
+  if (!requireScope(principal, API_SCOPES.WRITE)) {
+    return errorResponse(403, "missing_scope", "Scope vaults:write is required", context.requestId);
+  }
+
+  const found = await fetchOwnPendingItem(supabase, principal, itemId, context, "id, status, duplicate_of_publication_id");
+  if (found.errorResponse) return found.errorResponse;
+
+  if (!found.item.duplicate_of_publication_id) {
+    return errorResponse(409, "no_duplicate_target", "This item has no known duplicate to merge into", context.requestId);
+  }
+
+  const { data, error } = await supabase
+    .from("inbox_items")
+    .update({ status: "merged", filed_publication_id: found.item.duplicate_of_publication_id })
+    .eq("id", itemId)
+    .eq("user_id", principal.userId)
+    .select("id, filed_publication_id")
+    .single();
+
+  if (error) throw error;
+
+  return json(200, { data, meta: { request_id: context.requestId } });
+}
+
+export async function handleDeleteInboxItem(supabase, principal, context, itemId) {
+  if (!requireScope(principal, API_SCOPES.WRITE)) {
+    return errorResponse(403, "missing_scope", "Scope vaults:write is required", context.requestId);
+  }
+
+  const { data, error } = await supabase
+    .from("inbox_items")
+    .delete()
+    .eq("id", itemId)
+    .eq("user_id", principal.userId)
+    .select("id")
+    .maybeSingle();
+
+  if (error) throw error;
+  if (!data) return errorResponse(404, "inbox_item_not_found", "Inbox item not found", context.requestId);
+
+  return json(200, { data: { id: data.id }, meta: { request_id: context.requestId } });
+}

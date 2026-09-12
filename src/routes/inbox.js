@@ -19,6 +19,7 @@
  */
 
 import { API_SCOPES, requireScope } from "../auth.js";
+import { resolveVaultAccess, vaultAccessErrorMessage } from "../auth.js";
 import { json, errorResponse, parseJsonBody } from "../http.js";
 import { resolveDoiMetadata, cleanDoi } from "./import.js";
 import { parseBibtex } from "../bibtex.js";
@@ -139,4 +140,51 @@ export async function handleCreateInboxItem(supabase, principal, context, event)
   }
 
   return json(201, { data: created, meta: { request_id: context.requestId } });
+}
+
+export async function handleAcceptInboxItem(supabase, principal, context, itemId, event) {
+  if (!requireScope(principal, API_SCOPES.WRITE)) {
+    return errorResponse(403, "missing_scope", "Scope vaults:write is required", context.requestId);
+  }
+
+  const parsed = parseJsonBody(event);
+  if (!parsed.ok) {
+    return errorResponse(400, "invalid_json", "Request body must be valid JSON", context.requestId);
+  }
+
+  const body = parsed.value || {};
+  if (!body.vault_id || typeof body.vault_id !== "string") {
+    return errorResponse(400, "invalid_body", "Body must include vault_id", context.requestId);
+  }
+
+  const access = await resolveVaultAccess(supabase, principal, body.vault_id, "editor");
+  if (!access.ok) {
+    return errorResponse(access.status, access.code, vaultAccessErrorMessage(access.code), context.requestId);
+  }
+
+  const tagIds = Array.isArray(body.tag_ids) ? body.tag_ids : [];
+
+  const { data, error } = await supabase.rpc("accept_inbox_item", {
+    p_inbox_item_id: itemId,
+    p_target_vault_id: body.vault_id,
+    p_tag_ids: tagIds,
+    p_user_id: principal.userId,
+  });
+
+  if (error) {
+    if (error.code === "P0002") {
+      return errorResponse(404, "inbox_item_not_found", "Inbox item not found", context.requestId);
+    }
+    if (error.code === "23514") {
+      return errorResponse(409, "item_not_pending", "Inbox item is not pending", context.requestId);
+    }
+    throw error;
+  }
+
+  const result = Array.isArray(data) ? data[0] : data;
+
+  return json(200, {
+    data: { vault_publication_id: result.vault_publication_id, publication_id: result.publication_id },
+    meta: { request_id: context.requestId },
+  });
 }

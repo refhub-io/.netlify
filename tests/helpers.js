@@ -66,7 +66,13 @@ export function makeMockSupabaseMulti(tableResultQueues = {}, rpcResults = {}) {
       const result = queue[idx] ?? { data: null, error: null };
       return makeChain(result);
     },
-    rpc: (fn, args) => Promise.resolve(rpcResults[fn] ?? DEFAULT_RATE_LIMIT_RPC_RESULT),
+    rpc: (fn, args) => {
+      const queue = rpcResults[fn] ?? [];
+      const idx = cursors[fn] ?? 0;
+      cursors[fn] = idx + 1;
+      const result = Array.isArray(queue) ? (queue[idx] ?? DEFAULT_RATE_LIMIT_RPC_RESULT) : queue;
+      return Promise.resolve(result);
+    },
     auth: {
       getUser: () => Promise.resolve({ data: { user: null }, error: null }),
     },

@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { handleListInboxItems, handleCreateInboxItem } from "../../src/routes/inbox.js";
-import { makeMockSupabase, makeMockSupabaseMulti, makeApiKeyPrincipal, makeContext, makeEvent, parseBody } from "../helpers.js";
+import { handleListInboxItems, handleCreateInboxItem, handleAcceptInboxItem } from "../../src/routes/inbox.js";
+import { makeMockSupabase, makeMockSupabaseMulti, makeApiKeyPrincipal, makeContext, makeEvent, parseBody, makeMockVault } from "../helpers.js";
 
 const CTX = makeContext();
 
@@ -120,5 +120,100 @@ describe("handleCreateInboxItem", () => {
 
     expect(res.statusCode).toBe(201);
     expect(parseBody(res).data.parsed_fields.title).toBe("10.1/x");
+  });
+});
+
+// ─── handleAcceptInboxItem ──────────────────────────────────────────────────
+
+describe("handleAcceptInboxItem", () => {
+  it("returns 403 when write scope missing", async () => {
+    const supabase = makeMockSupabase({});
+    const principal = makeApiKeyPrincipal({ scopes: ["vaults:read"] });
+
+    const res = await handleAcceptInboxItem(supabase, principal, CTX, "item-1", makeEvent({ method: "POST", body: JSON.stringify({ vault_id: "v1" }) }));
+
+    expect(res.statusCode).toBe(403);
+  });
+
+  it("returns 400 when vault_id missing", async () => {
+    const supabase = makeMockSupabase({});
+    const principal = makeApiKeyPrincipal();
+
+    const res = await handleAcceptInboxItem(supabase, principal, CTX, "item-1", makeEvent({ method: "POST", body: JSON.stringify({}) }));
+
+    expect(res.statusCode).toBe(400);
+  });
+
+  it("returns vault access error when caller lacks editor permission", async () => {
+    const vault = makeMockVault({ user_id: "someone-else" });
+    const supabase = makeMockSupabaseMulti({
+      vaults: [{ data: vault, error: null }],
+      vault_shares: [{ data: null, error: null }],
+    });
+    const principal = makeApiKeyPrincipal();
+
+    const res = await handleAcceptInboxItem(supabase, principal, CTX, "item-1", makeEvent({ method: "POST", body: JSON.stringify({ vault_id: vault.id }) }));
+
+    expect(res.statusCode).toBe(403);
+  });
+
+  it("happy path: calls the RPC with correct args and returns 200", async () => {
+    const vault = makeMockVault();
+    const supabase = makeMockSupabaseMulti(
+      {
+        vaults: [{ data: vault, error: null }],
+        vault_shares: [{ data: null, error: null }],
+      },
+      { accept_inbox_item: [{ data: [{ vault_publication_id: "vp-1", publication_id: "pub-1" }], error: null }] },
+    );
+    const principal = makeApiKeyPrincipal();
+
+    const res = await handleAcceptInboxItem(supabase, principal, CTX, "item-1", makeEvent({
+      method: "POST",
+      body: JSON.stringify({ vault_id: vault.id, tag_ids: ["t1"] }),
+    }));
+
+    expect(res.statusCode).toBe(200);
+    expect(parseBody(res).data).toEqual({ vault_publication_id: "vp-1", publication_id: "pub-1" });
+  });
+
+  it("maps a not-found RPC error to 404", async () => {
+    const vault = makeMockVault();
+    const supabase = makeMockSupabaseMulti(
+      {
+        vaults: [{ data: vault, error: null }],
+        vault_shares: [{ data: null, error: null }],
+      },
+      { accept_inbox_item: [{ data: null, error: { code: "P0002", message: "inbox item not found" } }] },
+    );
+    const principal = makeApiKeyPrincipal();
+
+    const res = await handleAcceptInboxItem(supabase, principal, CTX, "missing-item", makeEvent({
+      method: "POST",
+      body: JSON.stringify({ vault_id: vault.id }),
+    }));
+
+    expect(res.statusCode).toBe(404);
+    expect(parseBody(res).error.code).toBe("inbox_item_not_found");
+  });
+
+  it("maps a not-pending RPC error to 409", async () => {
+    const vault = makeMockVault();
+    const supabase = makeMockSupabaseMulti(
+      {
+        vaults: [{ data: vault, error: null }],
+        vault_shares: [{ data: null, error: null }],
+      },
+      { accept_inbox_item: [{ data: null, error: { code: "23514", message: "inbox item is not pending" } }] },
+    );
+    const principal = makeApiKeyPrincipal();
+
+    const res = await handleAcceptInboxItem(supabase, principal, CTX, "item-1", makeEvent({
+      method: "POST",
+      body: JSON.stringify({ vault_id: vault.id }),
+    }));
+
+    expect(res.statusCode).toBe(409);
+    expect(parseBody(res).error.code).toBe("item_not_pending");
   });
 });

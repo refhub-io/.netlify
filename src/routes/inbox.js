@@ -18,8 +18,7 @@
  * design rationale.
  */
 
-import { API_SCOPES, requireScope } from "../auth.js";
-import { resolveVaultAccess, vaultAccessErrorMessage } from "../auth.js";
+import { API_SCOPES, requireScope, resolveVaultAccess, vaultAccessErrorMessage } from "../auth.js";
 import { json, errorResponse, parseJsonBody } from "../http.js";
 import { resolveDoiMetadata, cleanDoi } from "./import.js";
 import { parseBibtex } from "../bibtex.js";

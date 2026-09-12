@@ -216,6 +216,7 @@ export async function handleRejectInboxItem(supabase, principal, context, itemId
     .from("inbox_items")
     .update({ status: "rejected" })
     .eq("id", itemId)
+    .eq("user_id", principal.userId)
     .select("id")
     .single();
 
@@ -246,6 +247,7 @@ export async function handlePostponeInboxItem(supabase, principal, context, item
     .from("inbox_items")
     .update({ sort_order: maxSortOrder + 1 })
     .eq("id", itemId)
+    .eq("user_id", principal.userId)
     .select("id, sort_order")
     .single();
 

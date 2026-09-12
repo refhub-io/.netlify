@@ -187,3 +187,69 @@ export async function handleAcceptInboxItem(supabase, principal, context, itemId
     meta: { request_id: context.requestId },
   });
 }
+
+async function fetchOwnPendingItem(supabase, principal, itemId, context, selectCols = "id, status") {
+  const { data: item, error } = await supabase
+    .from("inbox_items")
+    .select(selectCols)
+    .eq("id", itemId)
+    .eq("user_id", principal.userId)
+    .maybeSingle();
+
+  if (error) throw error;
+  if (!item) return { errorResponse: errorResponse(404, "inbox_item_not_found", "Inbox item not found", context.requestId) };
+  if (item.status !== "pending") {
+    return { errorResponse: errorResponse(409, "item_not_pending", "Inbox item is not pending", context.requestId) };
+  }
+  return { item };
+}
+
+export async function handleRejectInboxItem(supabase, principal, context, itemId) {
+  if (!requireScope(principal, API_SCOPES.WRITE)) {
+    return errorResponse(403, "missing_scope", "Scope vaults:write is required", context.requestId);
+  }
+
+  const found = await fetchOwnPendingItem(supabase, principal, itemId, context);
+  if (found.errorResponse) return found.errorResponse;
+
+  const { data, error } = await supabase
+    .from("inbox_items")
+    .update({ status: "rejected" })
+    .eq("id", itemId)
+    .select("id")
+    .single();
+
+  if (error) throw error;
+
+  return json(200, { data: { id: data.id }, meta: { request_id: context.requestId } });
+}
+
+export async function handlePostponeInboxItem(supabase, principal, context, itemId) {
+  if (!requireScope(principal, API_SCOPES.WRITE)) {
+    return errorResponse(403, "missing_scope", "Scope vaults:write is required", context.requestId);
+  }
+
+  const found = await fetchOwnPendingItem(supabase, principal, itemId, context);
+  if (found.errorResponse) return found.errorResponse;
+
+  const { data: pending, error: pendingError } = await supabase
+    .from("inbox_items")
+    .select("sort_order")
+    .eq("user_id", principal.userId)
+    .eq("status", "pending");
+
+  if (pendingError) throw pendingError;
+
+  const maxSortOrder = (pending || []).reduce((max, item) => Math.max(max, item.sort_order), 0);
+
+  const { data, error } = await supabase
+    .from("inbox_items")
+    .update({ sort_order: maxSortOrder + 1 })
+    .eq("id", itemId)
+    .select("id, sort_order")
+    .single();
+
+  if (error) throw error;
+
+  return json(200, { data, meta: { request_id: context.requestId } });
+}

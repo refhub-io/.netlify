@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { handleListInboxItems, handleCreateInboxItem, handleAcceptInboxItem } from "../../src/routes/inbox.js";
+import { handleListInboxItems, handleCreateInboxItem, handleAcceptInboxItem, handleRejectInboxItem, handlePostponeInboxItem } from "../../src/routes/inbox.js";
 import { makeMockSupabase, makeMockSupabaseMulti, makeApiKeyPrincipal, makeContext, makeEvent, parseBody, makeMockVault } from "../helpers.js";
 
 const CTX = makeContext();
@@ -215,5 +215,95 @@ describe("handleAcceptInboxItem", () => {
 
     expect(res.statusCode).toBe(409);
     expect(parseBody(res).error.code).toBe("item_not_pending");
+  });
+});
+
+// ─── handleRejectInboxItem ──────────────────────────────────────────────────
+
+describe("handleRejectInboxItem", () => {
+  it("returns 403 when write scope missing", async () => {
+    const supabase = makeMockSupabase({});
+    const principal = makeApiKeyPrincipal({ scopes: ["vaults:read"] });
+
+    const res = await handleRejectInboxItem(supabase, principal, CTX, "item-1");
+
+    expect(res.statusCode).toBe(403);
+  });
+
+  it("returns 404 when the item doesn't exist for this user", async () => {
+    const supabase = makeMockSupabaseMulti({
+      inbox_items: [{ data: null, error: null }],
+    });
+    const principal = makeApiKeyPrincipal();
+
+    const res = await handleRejectInboxItem(supabase, principal, CTX, "item-1");
+
+    expect(res.statusCode).toBe(404);
+  });
+
+  it("returns 409 when the item exists but isn't pending", async () => {
+    const supabase = makeMockSupabaseMulti({
+      inbox_items: [{ data: { id: "item-1", status: "accepted" }, error: null }],
+    });
+    const principal = makeApiKeyPrincipal();
+
+    const res = await handleRejectInboxItem(supabase, principal, CTX, "item-1");
+
+    expect(res.statusCode).toBe(409);
+    expect(parseBody(res).error.code).toBe("item_not_pending");
+  });
+
+  it("happy path: sets status=rejected, returns 200 with id", async () => {
+    const supabase = makeMockSupabaseMulti({
+      inbox_items: [
+        { data: { id: "item-1", status: "pending" }, error: null },
+        { data: { id: "item-1" }, error: null },
+      ],
+    });
+    const principal = makeApiKeyPrincipal();
+
+    const res = await handleRejectInboxItem(supabase, principal, CTX, "item-1");
+
+    expect(res.statusCode).toBe(200);
+    expect(parseBody(res).data).toEqual({ id: "item-1" });
+  });
+});
+
+describe("handlePostponeInboxItem", () => {
+  it("returns 403 when write scope missing", async () => {
+    const supabase = makeMockSupabase({});
+    const principal = makeApiKeyPrincipal({ scopes: ["vaults:read"] });
+
+    const res = await handlePostponeInboxItem(supabase, principal, CTX, "item-1");
+
+    expect(res.statusCode).toBe(403);
+  });
+
+  it("returns 409 when the item exists but isn't pending", async () => {
+    const supabase = makeMockSupabaseMulti({
+      inbox_items: [{ data: { id: "item-1", status: "rejected" }, error: null }],
+    });
+    const principal = makeApiKeyPrincipal();
+
+    const res = await handlePostponeInboxItem(supabase, principal, CTX, "item-1");
+
+    expect(res.statusCode).toBe(409);
+    expect(parseBody(res).error.code).toBe("item_not_pending");
+  });
+
+  it("happy path: bumps sort_order past the current max and returns 200", async () => {
+    const supabase = makeMockSupabaseMulti({
+      inbox_items: [
+        { data: { id: "item-1", status: "pending" }, error: null },
+        { data: [{ sort_order: 3 }, { sort_order: 7 }], error: null },
+        { data: { id: "item-1", sort_order: 8 }, error: null },
+      ],
+    });
+    const principal = makeApiKeyPrincipal();
+
+    const res = await handlePostponeInboxItem(supabase, principal, CTX, "item-1");
+
+    expect(res.statusCode).toBe(200);
+    expect(parseBody(res).data).toEqual({ id: "item-1", sort_order: 8 });
   });
 });

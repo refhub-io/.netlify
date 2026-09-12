@@ -6,6 +6,12 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this
 project uses [Semantic Versioning](https://semver.org/). History prior to
 2.2.0 was not tracked in this file.
 
+## [2.8.0] - 2026-09-12
+
+### Added
+- `/api/v1/inbox` route family (list, capture, accept, reject, merge, postpone, delete) for user-scoped inbox items. List requires `vaults:read` scope; all other routes require `vaults:write` scope. Accept endpoint requires at least editor access to target `vault_id`.
+- `accept_inbox_item` atomic database function backing the accept endpoint: either the paper is fully filed into the vault and the inbox item is marked accepted, or nothing happens at all.
+
 ## [2.7.0] - 2026-09-08
 
 ### Added

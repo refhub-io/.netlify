@@ -33,6 +33,9 @@ describe("handleListInboxItems", () => {
 // ─── handleCreateInboxItem ───────────────────────────────────────────────────
 
 describe("handleCreateInboxItem", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
   it("returns 403 when write scope missing", async () => {
     const supabase = makeMockSupabase({});
     const principal = makeApiKeyPrincipal({ scopes: ["vaults:read"] });
@@ -105,9 +108,11 @@ describe("handleCreateInboxItem", () => {
     });
     const principal = makeApiKeyPrincipal();
 
-    // fetch is unmocked in this test environment, so the real CrossRef/OpenAlex
-    // calls in resolveDoiMetadata will fail (no network) and resolve to null --
-    // exercising exactly the degrade-gracefully path this test is for.
+    // Stub fetch to simulate both CrossRef and OpenAlex being unreachable --
+    // deterministic, no real network call. resolveDoiMetadata (from
+    // import.js) tries CrossRef first, then OpenAlex; both must fail here.
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: false }));
+
     const res = await handleCreateInboxItem(supabase, principal, CTX, makeEvent({
       method: "POST",
       body: JSON.stringify({ source_type: "doi", source_ref: "10.1/x" }),

@@ -21,7 +21,7 @@ import { reconstructAbstractFromInvertedIndex } from "../openalex.js";
 // DOI metadata fetchers
 // ---------------------------------------------------------------------------
 
-function cleanDoi(doi) {
+export function cleanDoi(doi) {
   return doi
     .trim()
     .replace(/^https?:\/\/(dx\.)?doi\.org\//, "")
@@ -100,7 +100,7 @@ async function fetchFromOpenAlex(doi) {
   }
 }
 
-async function resolveDoiMetadata(doi) {
+export async function resolveDoiMetadata(doi) {
   const crossRef = await fetchFromCrossRef(doi);
   if (crossRef) return crossRef;
   return fetchFromOpenAlex(doi);

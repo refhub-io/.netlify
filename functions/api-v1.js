@@ -117,6 +117,15 @@ import {
   handleListVaultAudit,
   handleListGlobalAudit,
 } from "../src/routes/audit.js";
+import {
+  handleListInboxItems,
+  handleCreateInboxItem,
+  handleAcceptInboxItem,
+  handleRejectInboxItem,
+  handleMergeInboxItem,
+  handlePostponeInboxItem,
+  handleDeleteInboxItem,
+} from "../src/routes/inbox.js";
 
 const PUBLICATION_FIELDS = [
   "title",
@@ -2485,6 +2494,21 @@ export async function handler(event) {
         response = await handleExportVault(supabase, principal, context, route[1], event);
       } else if (route.length === 2 && route[0] === "extension" && route[1] === "google-drive-status" && event.httpMethod === "GET") {
         response = await handleExtensionGoogleDriveStatus(supabase, principal, context);
+      // ── V2: inbox ─────────────────────────────────────────────────────────
+      } else if (route.length === 1 && route[0] === "inbox" && event.httpMethod === "GET") {
+        response = await handleListInboxItems(supabase, principal, context, event);
+      } else if (route.length === 1 && route[0] === "inbox" && event.httpMethod === "POST") {
+        response = await handleCreateInboxItem(supabase, principal, context, event);
+      } else if (route.length === 3 && route[0] === "inbox" && route[2] === "accept" && event.httpMethod === "POST") {
+        response = await handleAcceptInboxItem(supabase, principal, context, route[1], event);
+      } else if (route.length === 3 && route[0] === "inbox" && route[2] === "reject" && event.httpMethod === "POST") {
+        response = await handleRejectInboxItem(supabase, principal, context, route[1]);
+      } else if (route.length === 3 && route[0] === "inbox" && route[2] === "merge" && event.httpMethod === "POST") {
+        response = await handleMergeInboxItem(supabase, principal, context, route[1]);
+      } else if (route.length === 3 && route[0] === "inbox" && route[2] === "postpone" && event.httpMethod === "POST") {
+        response = await handlePostponeInboxItem(supabase, principal, context, route[1]);
+      } else if (route.length === 2 && route[0] === "inbox" && event.httpMethod === "DELETE") {
+        response = await handleDeleteInboxItem(supabase, principal, context, route[1]);
       } else {
         response = errorResponse(404, "route_not_found", "Route not found", context.requestId);
       }

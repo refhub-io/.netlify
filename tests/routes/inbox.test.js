@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
 import { handleListInboxItems, handleCreateInboxItem, handleAcceptInboxItem, handleRejectInboxItem, handlePostponeInboxItem, handleMergeInboxItem, handleDeleteInboxItem } from "../../src/routes/inbox.js";
-import { makeMockSupabase, makeMockSupabaseMulti, makeApiKeyPrincipal, makeContext, makeEvent, parseBody, makeMockVault } from "../helpers.js";
+import { makeMockSupabase, makeMockSupabaseMulti, makeCapturingSupabaseMulti, makeApiKeyPrincipal, makeContext, makeEvent, parseBody, makeMockVault } from "../helpers.js";
 
 const CTX = makeContext();
 
@@ -68,6 +68,36 @@ describe("handleCreateInboxItem", () => {
 
     expect(res.statusCode).toBe(201);
     expect(parseBody(res).data).toEqual(created);
+  });
+
+  it("manual: preserves fields beyond title", async () => {
+    const { supabase, captured } = makeCapturingSupabaseMulti(
+      { inbox_items: [{ data: { id: "new-1", status: "pending" }, error: null }] },
+      ["inbox_items"],
+    );
+    const principal = makeApiKeyPrincipal();
+
+    await handleCreateInboxItem(supabase, principal, CTX, makeEvent({
+      method: "POST",
+      body: JSON.stringify({ source_type: "manual", parsed_fields: { title: "My Paper", authors: ["A. Uthor"], year: 2020 } }),
+    }));
+
+    expect(captured.inbox_items.inserts[0].parsed_fields).toEqual({ title: "My Paper", authors: ["A. Uthor"], year: 2020 });
+  });
+
+  it("doi: stamps doi into a caller-supplied parsed_fields object", async () => {
+    const { supabase, captured } = makeCapturingSupabaseMulti(
+      { inbox_items: [{ data: { id: "new-1", status: "pending" }, error: null }] },
+      ["inbox_items"],
+    );
+    const principal = makeApiKeyPrincipal();
+
+    await handleCreateInboxItem(supabase, principal, CTX, makeEvent({
+      method: "POST",
+      body: JSON.stringify({ source_type: "doi", source_ref: "10.1/z", parsed_fields: { title: "Custom Title" } }),
+    }));
+
+    expect(captured.inbox_items.inserts[0].parsed_fields).toEqual({ title: "Custom Title", doi: "10.1/z" });
   });
 
   it("bibtex: creates one item per entry, response data is an array", async () => {
@@ -188,6 +218,8 @@ describe("handleAcceptInboxItem", () => {
       },
       { accept_inbox_item: [{ data: [{ vault_publication_id: "vp-1", publication_id: "pub-1" }], error: null }] },
     );
+    const rpcSpy = vi.fn(supabase.rpc.bind(supabase));
+    supabase.rpc = rpcSpy;
     const principal = makeApiKeyPrincipal();
 
     const res = await handleAcceptInboxItem(supabase, principal, CTX, "item-1", makeEvent({
@@ -197,6 +229,12 @@ describe("handleAcceptInboxItem", () => {
 
     expect(res.statusCode).toBe(200);
     expect(parseBody(res).data).toEqual({ vault_publication_id: "vp-1", publication_id: "pub-1" });
+    expect(rpcSpy).toHaveBeenCalledWith("accept_inbox_item", {
+      p_inbox_item_id: "item-1",
+      p_target_vault_id: vault.id,
+      p_tag_ids: ["t1"],
+      p_user_id: principal.userId,
+    });
   });
 
   it("maps a not-found RPC error to 404", async () => {
@@ -289,6 +327,24 @@ describe("handleRejectInboxItem", () => {
     expect(res.statusCode).toBe(200);
     expect(parseBody(res).data).toEqual({ id: "item-1" });
   });
+
+  it("returns 409 when the item stops being pending between the check and the update (race)", async () => {
+    // Regression test: the update used to omit the pending predicate, so a
+    // concurrent accept/merge/postpone that committed between the read and
+    // this write would still be silently overwritten by this request.
+    const supabase = makeMockSupabaseMulti({
+      inbox_items: [
+        { data: { id: "item-1", status: "pending" }, error: null },
+        { data: null, error: null },
+      ],
+    });
+    const principal = makeApiKeyPrincipal();
+
+    const res = await handleRejectInboxItem(supabase, principal, CTX, "item-1");
+
+    expect(res.statusCode).toBe(409);
+    expect(parseBody(res).error.code).toBe("item_not_pending");
+  });
 });
 
 describe("handlePostponeInboxItem", () => {
@@ -328,6 +384,22 @@ describe("handlePostponeInboxItem", () => {
     expect(res.statusCode).toBe(200);
     expect(parseBody(res).data).toEqual({ id: "item-1", sort_order: 8 });
   });
+
+  it("returns 409 when the item stops being pending between the check and the update (race)", async () => {
+    const supabase = makeMockSupabaseMulti({
+      inbox_items: [
+        { data: { id: "item-1", status: "pending" }, error: null },
+        { data: [{ sort_order: 3 }], error: null },
+        { data: null, error: null },
+      ],
+    });
+    const principal = makeApiKeyPrincipal();
+
+    const res = await handlePostponeInboxItem(supabase, principal, CTX, "item-1");
+
+    expect(res.statusCode).toBe(409);
+    expect(parseBody(res).error.code).toBe("item_not_pending");
+  });
 });
 
 describe("handleMergeInboxItem", () => {
@@ -365,6 +437,21 @@ describe("handleMergeInboxItem", () => {
 
     expect(res.statusCode).toBe(200);
     expect(parseBody(res).data).toEqual({ id: "item-1", filed_publication_id: "pub-1" });
+  });
+
+  it("returns 409 when the item stops being pending between the check and the update (race)", async () => {
+    const supabase = makeMockSupabaseMulti({
+      inbox_items: [
+        { data: { id: "item-1", status: "pending", duplicate_of_publication_id: "pub-1" }, error: null },
+        { data: null, error: null },
+      ],
+    });
+    const principal = makeApiKeyPrincipal();
+
+    const res = await handleMergeInboxItem(supabase, principal, CTX, "item-1");
+
+    expect(res.statusCode).toBe(409);
+    expect(parseBody(res).error.code).toBe("item_not_pending");
   });
 
   it("returns 404 when the item isn't found for this user", async () => {

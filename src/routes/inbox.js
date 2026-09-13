@@ -99,7 +99,9 @@ export async function handleCreateInboxItem(supabase, principal, context, event)
     if (!title || typeof title !== "string" || !title.trim()) {
       return errorResponse(400, "invalid_body", "parsed_fields.title is required for manual capture", context.requestId);
     }
-    const item = await insertInboxItem(supabase, principal, "manual", title.trim(), { title: title.trim() });
+    // Preserve every field the caller sent, not just title -- a CLI/agent
+    // manual capture may include authors/year/doi/etc. alongside the title.
+    const item = await insertInboxItem(supabase, principal, "manual", title.trim(), { ...body.parsed_fields, title: title.trim() });
     return json(201, { data: item, meta: { request_id: context.requestId } });
   }
 
@@ -110,7 +112,10 @@ export async function handleCreateInboxItem(supabase, principal, context, event)
     const doi = cleanDoi(body.source_ref);
     let parsedFields;
     if (body.parsed_fields) {
-      parsedFields = body.parsed_fields;
+      // Same doi-stamping requirement as the resolveDoiMetadata branch below:
+      // a caller-supplied parsed_fields with no doi key would otherwise file
+      // with publications.doi left NULL once accepted.
+      parsedFields = { ...body.parsed_fields, doi };
     } else {
       // Neither fetchFromCrossRef nor fetchFromOpenAlex (both in import.js)
       // put a `doi` key in their returned metadata -- handleImportDoi (the
@@ -219,15 +224,21 @@ export async function handleRejectInboxItem(supabase, principal, context, itemId
   const found = await fetchOwnPendingItem(supabase, principal, itemId, context);
   if (found.errorResponse) return found.errorResponse;
 
+  // The pending check above is a separate read from this write -- a
+  // concurrent accept/merge/postpone could commit in between, so this
+  // update repeats the pending predicate and treats a zero-row result as
+  // "no longer pending" rather than assuming the earlier check still holds.
   const { data, error } = await supabase
     .from("inbox_items")
     .update({ status: "rejected" })
     .eq("id", itemId)
     .eq("user_id", principal.userId)
+    .eq("status", "pending")
     .select("id")
-    .single();
+    .maybeSingle();
 
   if (error) throw error;
+  if (!data) return errorResponse(409, "item_not_pending", "Inbox item is not pending", context.requestId);
 
   return json(200, { data: { id: data.id }, meta: { request_id: context.requestId } });
 }
@@ -255,10 +266,12 @@ export async function handlePostponeInboxItem(supabase, principal, context, item
     .update({ sort_order: maxSortOrder + 1 })
     .eq("id", itemId)
     .eq("user_id", principal.userId)
+    .eq("status", "pending")
     .select("id, sort_order")
-    .single();
+    .maybeSingle();
 
   if (error) throw error;
+  if (!data) return errorResponse(409, "item_not_pending", "Inbox item is not pending", context.requestId);
 
   return json(200, { data, meta: { request_id: context.requestId } });
 }
@@ -280,10 +293,12 @@ export async function handleMergeInboxItem(supabase, principal, context, itemId)
     .update({ status: "merged", filed_publication_id: found.item.duplicate_of_publication_id })
     .eq("id", itemId)
     .eq("user_id", principal.userId)
+    .eq("status", "pending")
     .select("id, filed_publication_id")
-    .single();
+    .maybeSingle();
 
   if (error) throw error;
+  if (!data) return errorResponse(409, "item_not_pending", "Inbox item is not pending", context.requestId);
 
   return json(200, { data, meta: { request_id: context.requestId } });
 }

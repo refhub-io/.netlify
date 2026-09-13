@@ -84,6 +84,13 @@ GET    /api/v1/vaults/:vaultId/stats
 GET    /api/v1/vaults/:vaultId/changes
 GET    /api/v1/vaults/:vaultId/export
 GET    /api/v1/vaults/:vaultId/audit
+GET    /api/v1/inbox
+POST   /api/v1/inbox
+POST   /api/v1/inbox/:itemId/accept
+POST   /api/v1/inbox/:itemId/reject
+POST   /api/v1/inbox/:itemId/merge
+POST   /api/v1/inbox/:itemId/postpone
+DELETE /api/v1/inbox/:itemId
 GET    /api/v1/extension/google-drive-status
 POST   /api/v1/pdf-metadata
 ```

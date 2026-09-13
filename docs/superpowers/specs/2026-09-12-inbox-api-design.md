@@ -185,7 +185,8 @@ BEGIN
     INSERT INTO publication_tags (vault_publication_id, publication_id, tag_id)
     SELECT v_new_vault_pub_id, NULL, t.id
     FROM tags t
-    WHERE t.id = ANY(p_tag_ids) AND t.vault_id = p_target_vault_id;
+    WHERE t.id = ANY(p_tag_ids)
+      AND (t.vault_id = p_target_vault_id OR (t.vault_id IS NULL AND t.user_id = p_user_id));
   END IF;
 
   UPDATE inbox_items

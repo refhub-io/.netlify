@@ -593,6 +593,82 @@ Supported export formats:
 - `json`
 - `bibtex`
 
+### List inbox items
+
+Requires scope: `vaults:read`
+
+Returns only your own `pending` items — not vault-scoped, no vault permission check.
+
+```bash
+curl -s \
+  -H "Authorization: Bearer $RHK" \
+  "https://refhub-api.netlify.app/api/v1/inbox?limit=50"
+```
+
+### Capture an inbox item
+
+Requires scope: `vaults:write`
+
+```bash
+curl -s \
+  -X POST \
+  -H "Authorization: Bearer $RHK" \
+  -H "Content-Type: application/json" \
+  https://refhub-api.netlify.app/api/v1/inbox \
+  -d '{"source_type": "doi", "source_ref": "10.48550/arXiv.1706.03762"}'
+```
+
+`source_type` is one of `doi`, `bibtex`, or `manual`. For `manual`, pass `parsed_fields: { "title": "..." }` instead of relying on lookup:
+
+```json
+{ "source_type": "manual", "source_ref": "My Paper", "parsed_fields": { "title": "My Paper" } }
+```
+
+For `bibtex`, `source_ref` is the raw BibTeX text; a multi-entry string creates one inbox item per entry, and `data` in the response is an array in that case.
+
+### Accept an inbox item into a vault
+
+Requires scope: `vaults:write`. Also requires at least **editor** access to `vault_id`.
+
+```bash
+curl -s \
+  -X POST \
+  -H "Authorization: Bearer $RHK" \
+  -H "Content-Type: application/json" \
+  https://refhub-api.netlify.app/api/v1/inbox/<ITEM_ID>/accept \
+  -d '{"vault_id": "<VAULT_ID>", "tag_ids": ["tag-uuid-1"]}'
+```
+
+This is a single atomic operation (backed by the `accept_inbox_item` database function) — either the paper is fully filed into the vault and the inbox item is marked accepted, or nothing happens at all. `tag_ids` not belonging to `vault_id` are silently dropped.
+
+### Reject, merge, or postpone an inbox item
+
+Requires scope: `vaults:write`. No request body for any of these three.
+
+```bash
+curl -s -X POST -H "Authorization: Bearer $RHK" \
+  https://refhub-api.netlify.app/api/v1/inbox/<ITEM_ID>/reject
+```
+
+Replace `reject` with `merge` or `postpone` for the other two. `merge` requires the item to already have a detected duplicate (`duplicate_of_publication_id` set) — it returns `409 no_duplicate_target` otherwise; it never guesses.
+
+### Delete an inbox item
+
+Requires scope: `vaults:write`.
+
+```bash
+curl -s -X DELETE -H "Authorization: Bearer $RHK" \
+  https://refhub-api.netlify.app/api/v1/inbox/<ITEM_ID>
+```
+
+Works regardless of the item's status (pending, accepted, rejected, merged) — this is a hard delete for cleanup, not a triage action.
+
+Notes:
+
+- inbox routes are the one V2 data-route family that is **not** vault-scoped — an item belongs to your account until you accept it into a specific vault
+- vault/tag suggestions and duplicate detection are computed by the refhub.io web app, not this API; `suggested_vault_id`, `suggested_tag_ids`, and `duplicate_of_publication_id` reflect whatever the web app has already scored (often `null` for API-only captures)
+- `reject`/`merge`/`postpone` on an item that isn't `pending` return `409 item_not_pending`
+
 ---
 
 ## Vault restrictions

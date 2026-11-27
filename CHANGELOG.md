@@ -6,6 +6,16 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this
 project uses [Semantic Versioning](https://semver.org/). History prior to
 2.2.0 was not tracked in this file.
 
+## [2.8.2] - 2026-11-27
+
+### Changed
+- BibTeX export now matches the web app (#43). Stored citation keys are kept exactly as written, dropping only characters a BibTeX key can't contain, so `Smith2020` no longer exports as `smith2020`. Documents that cite the old lowercased keys need updating. Generated keys strip accents instead of dropping accented letters, and use `nd` for a missing year. Values convert Unicode to LaTeX and escape `& % $ # _`; balanced braces such as `{GPU}` are kept.
+
+### Fixed
+- A value with unmatched braces can no longer break a BibTeX export. BibTeX counts every brace, escaped or not, when it looks for the end of a field, so these braces now become `\textbraceleft{}` / `\textbraceright{}` (#43).
+- A `relation_type` outside `cites`, `extends`, `builds_on`, `contradicts`, `reviews` and `related` is rejected with `400 invalid_relation_type` on create and update (#48).
+- A failed vault or share lookup returns `503 vault_lookup_failed` instead of `404 vault_not_found` or `403 insufficient_vault_access` (#44).
+
 ## [2.8.1] - 2026-11-27
 
 ### Added

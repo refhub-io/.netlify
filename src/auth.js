@@ -201,7 +201,13 @@ export async function resolveVaultAccess(
     .eq("id", vaultId)
     .maybeSingle();
 
-  if (error || !vault) {
+  // A failed query is not an answer: report it as a retryable lookup failure, so a
+  // database hiccup never reads to the client as "vault doesn't exist" or "access denied".
+  if (error) {
+    console.error("Vault lookup failed", { vaultId, message: error.message });
+    return { ok: false, status: 503, code: "vault_lookup_failed" };
+  }
+  if (!vault) {
     return { ok: false, status: 404, code: "vault_not_found" };
   }
 
@@ -210,12 +216,17 @@ export async function resolveVaultAccess(
   if (vault.user_id === principal.userId) {
     permission = "owner";
   } else {
-    const { data: share } = await supabase
+    const { data: share, error: shareError } = await supabase
       .from("vault_shares")
       .select("role")
       .eq("vault_id", vaultId)
       .eq("shared_with_user_id", principal.userId)
       .maybeSingle();
+
+    if (shareError) {
+      console.error("Vault share lookup failed", { vaultId, message: shareError.message });
+      return { ok: false, status: 503, code: "vault_lookup_failed" };
+    }
 
     if (share?.role) {
       permission = share.role;
@@ -250,5 +261,6 @@ export async function resolveVaultAccess(
 export function vaultAccessErrorMessage(code) {
   if (code === "vault_not_found") return "Vault not found";
   if (code === "vault_archived") return "This vault is archived and is permanently read-only";
+  if (code === "vault_lookup_failed") return "Could not check vault access right now; try again";
   return "Vault access denied";
 }

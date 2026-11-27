@@ -543,6 +543,15 @@ response shape (create/update — a single section object; list returns the same
 
 scope: `vaults:export` · permission: viewer. supported formats: `json` · `bibtex`.
 
+bibtex keys and escaping match the web app's export (pinned by `tests/fixtures/bibtex-golden.json`, shared with refhub.io):
+- a stored `bibtex_key` is used as written; only characters a BibTeX key can't contain (whitespace and `" # % ' ( ) , = { } \ ~`) are dropped
+- otherwise the key is `<first author's last name><year or nd><first title word>`, lowercased with accents stripped
+- values convert Unicode to LaTeX and escape `& % $ # _`; balanced braces such as `{GPU}` are kept, unmatched braces become `\textbraceleft{}` / `\textbraceright{}`, and line breaks become spaces
+
+### relations: `relation_type`
+
+`POST` and `PATCH /api/v1/vaults/:vaultId/relations[/:relationId]` accept one of `cites`, `extends`, `builds_on`, `contradicts`, `reviews` or `related` (the default on create). anything else returns `400 invalid_relation_type`, with the allowed values in `error.details.allowed`. the database enforces the same list.
+
 ---
 
 ## // audit logging

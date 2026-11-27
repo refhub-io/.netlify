@@ -65,6 +65,19 @@ describe("handleListRelations", () => {
 // ─── handleCreateRelation ────────────────────────────────────────────────────
 
 describe("handleCreateRelation", () => {
+  it("returns 400 invalid_relation_type for a type outside the shared list", async () => {
+    const vault = makeMockVault();
+    const supabase = makeMockSupabase({ vaults: { data: vault, error: null }, vault_shares: { data: null, error: null } });
+    const event = makeEvent({ body: JSON.stringify({ publication_id: "p1", related_publication_id: "p2", relation_type: "cites_typo" }) });
+
+    const res = await handleCreateRelation(supabase, makeApiKeyPrincipal(), CTX, vault.id, event);
+
+    expect(res.statusCode).toBe(400);
+    const body = parseBody(res);
+    expect(body.error.code).toBe("invalid_relation_type");
+    expect(body.error.details.allowed).toEqual(["cites", "extends", "builds_on", "contradicts", "reviews", "related"]);
+  });
+
   it("returns 400 when self-reference", async () => {
     const vault = makeMockVault();
     const supabase = makeMockSupabase({ vaults: { data: vault, error: null }, vault_shares: { data: null, error: null } });
@@ -128,6 +141,17 @@ describe("handleUpdateRelation", () => {
     const res = await handleUpdateRelation(supabase, principal, CTX, vault.id, "missing", event);
 
     expect(res.statusCode).toBe(404);
+  });
+
+  it("returns 400 invalid_relation_type for a type outside the shared list", async () => {
+    const vault = makeMockVault();
+    const supabase = makeMockSupabase({ vaults: { data: vault, error: null }, vault_shares: { data: null, error: null } });
+    const event = makeEvent({ body: JSON.stringify({ relation_type: "contradict" }) });
+
+    const res = await handleUpdateRelation(supabase, makeApiKeyPrincipal(), CTX, vault.id, "r1", event);
+
+    expect(res.statusCode).toBe(400);
+    expect(parseBody(res).error.code).toBe("invalid_relation_type");
   });
 
   it("returns 400 when relation_type missing", async () => {

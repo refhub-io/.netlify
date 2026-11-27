@@ -40,6 +40,39 @@ describe("requireScope", () => {
   });
 });
 
+describe("resolveVaultAccess — lookup errors", () => {
+  const dbError = { message: "connection reset" };
+
+  it("reports a failed vault query as a retryable 503, not as vault_not_found", async () => {
+    const supabase = makeMockSupabase({ vaults: { data: null, error: dbError } });
+    const access = await resolveVaultAccess(supabase, makeApiKeyPrincipal(), "vault-1", "viewer");
+
+    expect(access).toEqual({ ok: false, status: 503, code: "vault_lookup_failed" });
+  });
+
+  it("still reports a vault that genuinely doesn't exist as 404 vault_not_found", async () => {
+    const supabase = makeMockSupabase({ vaults: { data: null, error: null } });
+    const access = await resolveVaultAccess(supabase, makeApiKeyPrincipal(), "vault-1", "viewer");
+
+    expect(access).toEqual({ ok: false, status: 404, code: "vault_not_found" });
+  });
+
+  it("reports a failed share lookup as a retryable 503, not as access denied", async () => {
+    const vault = makeMockVault({ user_id: "someone-else", visibility: "private" });
+    const supabase = makeMockSupabase({
+      vaults: { data: vault, error: null },
+      vault_shares: { data: null, error: dbError },
+    });
+    const access = await resolveVaultAccess(supabase, makeApiKeyPrincipal(), vault.id, "viewer");
+
+    expect(access).toEqual({ ok: false, status: 503, code: "vault_lookup_failed" });
+  });
+
+  it("gives vault_lookup_failed a retry message", () => {
+    expect(vaultAccessErrorMessage("vault_lookup_failed")).toBe("Could not check vault access right now; try again");
+  });
+});
+
 describe("resolveVaultAccess — archived vaults", () => {
   function makeSupabaseForVault(vault) {
     return makeMockSupabase({

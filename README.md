@@ -448,7 +448,7 @@ auth: supabase session jwt only. Uploads a PDF for a publication the authenticat
 
 errors: `404 publication_not_found` · `503 drive_not_linked` · `502 drive_upload_failed`.
 
-**requires migration** `20260513000000_publication_pdf_assets_library_uploads.sql` — drops the NOT NULL constraint on `vault_publication_id` and adds the partial unique index `(publication_id, storage_provider) WHERE publication_id IS NOT NULL AND vault_publication_id IS NULL`.
+**requires migration** `013_publication_pdf_assets_library_uploads.sql` (in refhub.io's `supabase/migrations/`) — drops the NOT NULL constraint on `vault_publication_id` and adds the partial unique index `(publication_id, storage_provider) WHERE publication_id IS NOT NULL AND vault_publication_id IS NULL`.
 
 ### `GET /api/v1/vaults`
 

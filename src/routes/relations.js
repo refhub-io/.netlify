@@ -18,6 +18,20 @@ import { touchVaultUpdatedAt } from "./utils.js";
 
 const RELATION_SELECT = "id, publication_id, related_publication_id, relation_type, created_at, created_by";
 
+// The one list of relation types; the database enforces the same list with a CHECK
+// constraint (refhub.io migration). "related" is the default for new relations.
+export const RELATION_TYPES = ["cites", "extends", "builds_on", "contradicts", "reviews", "related"];
+
+function invalidRelationType(requestId) {
+  return errorResponse(
+    400,
+    "invalid_relation_type",
+    `relation_type must be one of: ${RELATION_TYPES.join(", ")}`,
+    requestId,
+    { allowed: RELATION_TYPES },
+  );
+}
+
 export async function handleListRelations(supabase, principal, context, vaultId, event) {
   if (!requireScope(principal, API_SCOPES.READ)) {
     return errorResponse(403, "missing_scope", "Scope vaults:read is required", context.requestId);
@@ -88,6 +102,9 @@ export async function handleCreateRelation(supabase, principal, context, vaultId
       context.requestId,
     );
   }
+  if (body.relation_type !== undefined && !RELATION_TYPES.includes(body.relation_type)) {
+    return invalidRelationType(context.requestId);
+  }
   if (body.publication_id === body.related_publication_id) {
     return errorResponse(
       400,
@@ -155,6 +172,9 @@ export async function handleUpdateRelation(supabase, principal, context, vaultId
   const body = parsed.value || {};
   if (!body.relation_type) {
     return errorResponse(400, "invalid_body", "Body must include relation_type", context.requestId);
+  }
+  if (!RELATION_TYPES.includes(body.relation_type)) {
+    return invalidRelationType(context.requestId);
   }
 
   // Fetch the relation and verify it belongs to this vault via its source publication

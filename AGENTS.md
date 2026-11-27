@@ -17,7 +17,7 @@ No unrequested refactors, no speculative abstractions, no drive-by cleanups bund
 Don't let one commit accumulate multiple unrelated changes, and don't sit on working code uncommitted. As soon as a change does what it was supposed to do, verify it and commit it:
 
 - `npm test` — all tests passing
-- `npm run check` — syntax-checks every handler/lib file (`node --check`)
+- `npm run check` — syntax-checks every `.js` file under `functions/`, `src/` and `scripts/` (`node --check`)
 - For anything touching auth, scopes, or RLS-adjacent logic: double-check by hand, this backend has no separate staging environment
 
 Small, working commits are easier to review, bisect, and revert than one large commit at the end.

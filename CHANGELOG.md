@@ -6,6 +6,21 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this
 project uses [Semantic Versioning](https://semver.org/). History prior to
 2.2.0 was not tracked in this file.
 
+## [2.8.1] - 2026-11-27
+
+### Added
+- CI: a GitHub Actions workflow runs `npm run check` and the full test suite on every pull request and on every push to `main`, with the placeholder env from `CONTRIBUTING.md`.
+
+### Changed
+- `npm run check` now syntax-checks every `.js` file under `functions/`, `src/` and `scripts/`. The old hand-written list covered 10 files and missed 9 of the 10 route modules.
+- The audit-log viewer TODO in `src/routes/audit.js` now points to refhub-io/refhub.io#271, where the frontend work is tracked.
+
+### Fixed
+- README: the PDF-assets migration is `013_publication_pdf_assets_library_uploads.sql`, as named in refhub.io, not `20260513000000_…`.
+
+### Removed
+- `PROGRESS.md`, a scaffold log from March 2026. Its open items are done (tests, deployment) or tracked in #12 (rate limiting and abuse resistance).
+
 ## [2.8.0] - 2026-09-12
 
 ### Added

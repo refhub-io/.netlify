@@ -9,7 +9,7 @@
  * owner access can read its vault-level audit log.  Global audit is management
  * only, which is enforced by the dispatcher routing (management branch).
  *
- * TODO: expose audit log viewer in the frontend API Key management panel.
+ * The frontend viewer for these logs is tracked in refhub-io/refhub.io#271.
  */
 
 import { resolveVaultAccess, vaultAccessErrorMessage } from "../auth.js";
